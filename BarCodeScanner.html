@@ -205,48 +205,51 @@
         document.getElementById('startBtn').style.display = 'none';
         document.getElementById('stopBtn').style.display  = '';
 
-        zxReader = new ZXing.BrowserMultiFormatReader();
-
-        // ── Why decodeFromConstraints instead of decodeFromVideoDevice ─────────
-        // listVideoInputDevices() requires camera permission BEFORE it can return
-        // device labels — creating a chicken-and-egg problem on mobile where the
-        // permission popup never appears. decodeFromConstraints skips enumeration
-        // entirely: it passes constraints straight to getUserMedia, which triggers
-        // the permission popup immediately. facingMode:'environment' picks the
-        // rear camera on mobile and is simply ignored on laptops.
-        var constraints = {
+        // ── Two-step camera start ──────────────────────────────────────────────
+        // Step 1: getUserMedia directly — this is the ONLY reliable way to
+        //         trigger the permission popup on Android Chrome. Any ZXing
+        //         method that internally calls getUserMedia indirectly can
+        //         fail silently on mobile without showing the popup.
+        // Step 2: Hand the live stream to ZXing's decodeFromStream so it can
+        //         read barcodes from the video without managing the stream itself.
+        navigator.mediaDevices.getUserMedia({
             video: {
                 facingMode: { ideal: 'environment' },
                 width:  { ideal: 1280 },
                 height: { ideal: 720 }
-            }
-        };
+            },
+            audio: false
+        }).then(function(stream) {
 
-        zxReader.decodeFromConstraints(constraints, 'camVideo', function(result, err) {
-            // ZXing fires this callback on every frame.
-            // err = no barcode visible this frame — normal, ignore it.
-            // Only act when result is populated with a real detection.
-            if (!result) return;
+            // Attach stream to our video element so it shows on screen
+            var video = document.getElementById('camVideo');
+            video.srcObject = stream;
 
-            var code = result.getText();
-            var fmt  = result.getBarcodeFormat();
-            var now  = Date.now();
+            // Create ZXing reader and point it at the already-live stream.
+            // decodeFromStream takes the MediaStream + video element — it does
+            // NOT call getUserMedia itself, so no second permission request.
+            zxReader = new ZXing.BrowserMultiFormatReader();
+            return zxReader.decodeFromStream(stream, video, function(result, err) {
+                if (!result) return;
 
-            if (!code || code.length < 3) return;
-            if (code === lastCode && (now - lastTime) < COOLDOWN) return;
+                var code = result.getText();
+                var fmt  = result.getBarcodeFormat();
+                var now  = Date.now();
 
-            lastCode = code; lastTime = now;
+                if (!code || code.length < 3) return;
+                if (code === lastCode && (now - lastTime) < COOLDOWN) return;
 
-            // Convert ZXing's numeric format enum to a readable string
-            var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
-            commitScan(code, fmtName);
+                lastCode = code; lastTime = now;
+                var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
+                commitScan(code, fmtName);
+            });
 
         }).then(function() {
             scanning = true;
             setStatus('active', 'Scanning... point camera at barcode');
         }).catch(function(err) {
             setStatus('error', 'Camera error: ' + err.message);
-            console.error('ZXing error:', err);
+            console.error('Scanner error:', err);
             document.getElementById('startBtn').style.display = '';
             document.getElementById('stopBtn').style.display  = 'none';
         });
