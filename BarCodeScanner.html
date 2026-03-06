@@ -252,16 +252,16 @@
             video: {
                 facingMode: { ideal: 'environment' },
                 width:  { ideal: 1280 },
-                height: { ideal: 720 },
-                focusMode: 'continuous'   // keep camera continuously auto-focusing
+                height: { ideal: 720 }
             }
         }).then(function(stream) {
-            // After stream opens, apply advanced focus constraint directly
-            // to the track — getUserMedia alone doesn't always honour focusMode
+            // Apply continuous autofocus directly to the track after stream opens.
+            // This is the correct way — focusMode is not a valid getUserMedia
+            // constraint, it must be applied via applyConstraints on the live track.
             var track = stream.getVideoTracks()[0];
             if (track && track.applyConstraints) {
                 track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] })
-                    .catch(function() { /* not supported on this device — ignore */ });
+                    .catch(function() { /* camera doesn't support controllable focus — ignore */ });
             }
             camStream = stream;
             var video = document.getElementById('camVideo');
@@ -327,8 +327,7 @@
                 constraints: {
                     // NO facingMode — let browser pick the only available camera
                     width:  { ideal: 1280 },
-                    height: { ideal: 720 },
-                    focusMode: 'continuous'   // continuous autofocus for sharp barcode reads
+                    height: { ideal: 720 }
                 }
             },
             decoder: {
@@ -353,6 +352,17 @@
             Quagga.start();
             scanning = true;
             setStatus('active', 'Scanning... point camera at barcode');
+
+            // Apply continuous autofocus to the Quagga-managed stream track
+            var video = document.querySelector('#scanner-container video');
+            if (video && video.srcObject) {
+                var track = video.srcObject.getVideoTracks()[0];
+                if (track && track.applyConstraints) {
+                    track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] })
+                        .catch(function(){});
+                }
+            }
+
             Quagga.onDetected(onQuaggaDetected);
         });
     }
