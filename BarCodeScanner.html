@@ -253,10 +253,32 @@
             nativeStream = stream;
             var video = document.getElementById('camVideo');
             video.srcObject = stream;
-            video.play().then(function() {
+
+            // ── Black video fix ────────────────────────────────────────────────
+            // On Android Chrome, video.play() resolves BEFORE the first frame is
+            // painted — the video element exists but renders black. The lock/unlock
+            // workaround users were doing forced a browser repaint that fixed it.
+            //
+            // Fix: listen to the 'playing' event instead of play().then().
+            // 'playing' fires only when actual pixel frames are being rendered.
+            // Then force a reflow (toggle display) to flush Android's render pipeline.
+            video.addEventListener('playing', function onPlaying() {
+                video.removeEventListener('playing', onPlaying);
+
+                // Force a reflow — flushes Android Chrome's stale render state
+                video.style.display = 'none';
+                video.offsetHeight;          // reading offsetHeight forces a reflow
+                video.style.display = 'block';
+
                 scanning = true;
                 setStatus('active', 'Scanning... point camera at barcode');
                 nativeScanFrame();
+            });
+
+            video.play().catch(function(err) {
+                setStatus('error', 'Video error: ' + err.message);
+                document.getElementById('startBtn').style.display = '';
+                document.getElementById('stopBtn').style.display  = 'none';
             });
         }).catch(function(err) {
             setStatus('error', 'Camera error: ' + err.message);
