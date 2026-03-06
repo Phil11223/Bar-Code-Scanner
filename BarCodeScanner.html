@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Barcode Scanner → CSV</title>
+    <title>Barcode Scanner</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -31,10 +31,11 @@
             letter-spacing: 1px; color: #4cc9f0; margin-bottom: 14px;
         }
 
-        /* ── Scanner container ──────────────────────────────────────────────
-           Only <video> is stretched to fill. Quagga's injected <canvas>
-           must NOT be forced to 100% — that warps its internal coordinate
-           grid and breaks barcode location detection entirely.             */
+        /* ── Scanner ────────────────────────────────────────────────────────
+           CRITICAL: canvas must NOT be forced to 100% width/height.
+           Quagga uses the canvas pixel dimensions for coordinate mapping —
+           stretching it via CSS breaks barcode location entirely.
+           Only the video element gets stretched to fill the container.    */
         #scanner-container {
             position: relative; width: 100%;
             border-radius: 12px; overflow: hidden;
@@ -46,7 +47,6 @@
         }
         #scanner-container canvas { display: none; }
 
-        /* Scan guide overlay */
         .scan-overlay {
             position: absolute; top: 50%; left: 50%;
             transform: translate(-50%, -50%);
@@ -62,7 +62,6 @@
         }
         @keyframes scanLine { 0%{top:0} 100%{top:100%} }
 
-        /* Green viewport flash */
         #scan-flash {
             position: absolute; inset: 0;
             background: rgba(45,198,83,0.35);
@@ -71,7 +70,6 @@
         #scan-flash.pop { animation: flashPop 0.5s ease forwards; }
         @keyframes flashPop { 0%{opacity:1} 100%{opacity:0} }
 
-        /* Card border pulse */
         .flash { animation: cardFlash 0.7s ease forwards; }
         @keyframes cardFlash {
             0%   { box-shadow: 0 0 0 0px  rgba(45,198,83,0.9), 0 4px 20px rgba(0,0,0,0.4); }
@@ -79,7 +77,6 @@
             100% { box-shadow: 0 0 0 0px  rgba(45,198,83,0),   0 4px 20px rgba(0,0,0,0.4); }
         }
 
-        /* Confirmation banner */
         #confirm-banner {
             display: none; align-items: center; gap: 10px;
             margin-top: 10px; padding: 10px 14px;
@@ -161,7 +158,7 @@
 <div class="card">
     <h2>&#9999;&#65039; Manual Entry</h2>
     <div class="manual-row">
-        <input type="text" id="manualInput" placeholder="Type or paste a barcode value&hellip;" />
+        <input type="text" id="manualInput" placeholder="Type or paste a barcode value..." />
         <button onclick="addManual()">Add</button>
     </div>
 </div>
@@ -183,17 +180,11 @@
 </div>
 
 <script>
-    // ── State ────────────────────────────────────────────────────────────────
-    var records    = [];
-    var scanning   = false;
+    var records     = [];
+    var scanning    = false;
     var bannerTimer = null;
-
-    // Duplicate prevention: track last code + last commit time
-    var lastCode   = '';
-    var lastCodeAt = 0;
-    var lastCommit = 0;
-    var CODE_COOL  = 4000;   // ignore same code for 4s after logging
-    var GLOBAL_COOL = 1500;  // freeze everything for 1.5s after any commit
+    var lastCode    = '';
+    var lastTime    = 0;
 
     // ── Persist ───────────────────────────────────────────────────────────────
     function loadData() {
@@ -218,33 +209,28 @@
                 name: 'Live',
                 type: 'LiveStream',
                 target: document.getElementById('scanner-container'),
-                constraints: { facingMode: 'environment', width: { ideal:1280 }, height: { ideal:720 } }
+                constraints: {
+                    facingMode: 'environment',
+                    width:  { ideal: 1280 },
+                    height: { ideal: 720 }
+                }
             },
             decoder: {
-                // Reader list is critical for correct values:
-                //
-                // EXCLUDED — ean_8_reader:
-                //   Decodes 8 digits from the MIDDLE of an EAN-13 barcode.
-                //   Same physical label → wrong short number every time.
-                //
-                // EXCLUDED — upc_reader / upc_e_reader:
-                //   UPC-A strips the leading 0 from EAN-13.
-                //   The number on the product has 13 digits; upc_reader
-                //   returns only 12. ean_reader handles UPC-A correctly.
-                //
-                // EXCLUDED — i2of5_reader:
-                //   No checksum validation. Reads phantom codes from the
-                //   bar patterns inside other barcode types.
                 readers: [
-                    'ean_reader',       // EAN-13 + UPC-A → full 13-digit printed value
-                    'code_128_reader',  // retail, warehouse, shipping
-                    'code_39_reader',   // industrial, automotive
-                    'codabar_reader'    // libraries, blood banks
+                    // ean_reader handles both EAN-13 and UPC-A barcodes,
+                    // returning the full digit string printed on the product.
+                    // ean_8, upc, upc_e and i2of5 all cause wrong values
+                    // so are intentionally excluded.
+                    'ean_reader',
+                    'code_128_reader',
+                    'code_39_reader',
+                    'codabar_reader'
                 ]
             },
             locate:       true,
-            numOfWorkers: 2,
-            frequency:    15
+            numOfWorkers: 0,   // CRITICAL for mobile — Web Workers are unreliable
+                               // on Android Chrome. 0 = synchronous, works everywhere.
+            frequency:    10   // 10 attempts/sec — reliable on low-end phones
         }, function(err) {
             if (err) {
                 setStatus('error', 'Camera error: ' + err.message);
@@ -261,28 +247,26 @@
     }
 
     // ── Detection ─────────────────────────────────────────────────────────────
-    // Direct live-stream commit — no snapshot, no vote system.
-    // Two simple cooldowns prevent duplicates without blocking legitimate reads.
+    // Simple 2-second debounce — same code within 2s is ignored.
+    // This is the approach that was confirmed working (15-record screenshot).
     function onDetected(result) {
-        var now    = Date.now();
         var code   = result.codeResult.code;
         var format = result.codeResult.format;
+        var now    = Date.now();
 
         if (!code || code.length < 3) return;
 
-        // Global cooldown — brief freeze after any commit
-        if (now - lastCommit < GLOBAL_COOL) return;
+        // Ignore same code fired repeatedly within 2 seconds
+        if (code === lastCode && (now - lastTime) < 2000) return;
 
-        // Per-code cooldown — same value too soon
-        if (code === lastCode && (now - lastCodeAt) < CODE_COOL) return;
+        lastCode = code;
+        lastTime = now;
 
-        // Normalise: ean_reader occasionally returns 12 digits for a UPC-A
-        // barcode. The number printed on the product is always 13 — pad it.
-        if (format === 'ean_13' && code.length === 12) code = '0' + code;
-
-        lastCode   = code;
-        lastCodeAt = now;
-        lastCommit = now;
+        // ean_reader can return 12 digits for a UPC-A barcode.
+        // The number printed on the product is always 13 — pad with leading 0.
+        if (format === 'ean_13' && code.length === 12) {
+            code = '0' + code;
+        }
 
         commitScan(code, format);
     }
@@ -295,7 +279,7 @@
         void fl.offsetWidth;
         fl.classList.add('pop');
 
-        // Green pulse on card border
+        // Green pulse on card
         var card = document.getElementById('cameraCard');
         card.classList.remove('flash');
         void card.offsetWidth;
@@ -323,7 +307,7 @@
             Quagga.stop();
             scanning = false;
         }
-        lastCode = ''; lastCodeAt = 0; lastCommit = 0;
+        lastCode = ''; lastTime = 0;
         document.getElementById('startBtn').style.display = '';
         document.getElementById('stopBtn').style.display  = 'none';
         document.getElementById('confirm-banner').classList.remove('show');
@@ -331,7 +315,7 @@
         setHint('');
     }
 
-    // ── UI helpers ────────────────────────────────────────────────────────────
+    // ── UI ────────────────────────────────────────────────────────────────────
     function setStatus(type, msg) {
         var dot = document.getElementById('statusDot');
         dot.className = 'dot';
@@ -344,7 +328,7 @@
     // ── Records ───────────────────────────────────────────────────────────────
     function addRecord(value, format) {
         var ts = new Date().toISOString().replace('T',' ').substring(0,19);
-        records.push({ value:value, format:format||'manual', ts:ts });
+        records.push({ value: value, format: format || 'manual', ts: ts });
         renderTable();
         saveData();
     }
@@ -372,8 +356,14 @@
             tbody.innerHTML = '<tr><td colspan="5" class="empty-msg">No barcodes scanned yet.</td></tr>';
             return;
         }
-        tbody.innerHTML = records.map(function(r,i) {
-            return '<tr><td>'+(i+1)+'</td><td><strong>'+esc(r.value)+'</strong></td><td>'+esc(r.format)+'</td><td>'+esc(r.ts)+'</td><td><button class="del-btn" onclick="deleteRecord('+i+')">&#10005;</button></td></tr>';
+        tbody.innerHTML = records.map(function(r, i) {
+            return '<tr>' +
+                '<td>' + (i+1) + '</td>' +
+                '<td><strong>' + esc(r.value) + '</strong></td>' +
+                '<td>' + esc(r.format) + '</td>' +
+                '<td>' + esc(r.ts) + '</td>' +
+                '<td><button class="del-btn" onclick="deleteRecord(' + i + ')">&#10005;</button></td>' +
+                '</tr>';
         }).join('');
     }
     function esc(s) {
@@ -382,14 +372,26 @@
 
     // ── CSV ───────────────────────────────────────────────────────────────────
     function downloadCSV() {
-        if (!records.length) { setStatus('error','Nothing to export!'); setTimeout(function(){setStatus('idle','');},2000); return; }
+        if (!records.length) {
+            setStatus('error', 'Nothing to export!');
+            setTimeout(function(){ setStatus('idle',''); }, 2000);
+            return;
+        }
         var header = ['#','Barcode Value','Format','Timestamp'];
-        var rows = records.map(function(r,i){ return [i+1,'"'+r.value.replace(/"/g,'""')+'"','"'+r.format+'"','"'+r.ts+'"']; });
-        var csv = [header.join(',')].concat(rows.map(function(r){return r.join(',');})).join('\r\n');
-        var blob = new Blob([csv],{type:'text/csv;charset=utf-8;'});
-        var name = 'barcodes_'+new Date().toISOString().slice(0,10)+'.csv';
-        if (window.fs && window.fs.downloadFile) { window.fs.downloadFile(blob,name); }
-        else { var url=URL.createObjectURL(blob); var a=document.createElement('a'); a.href=url; a.download=name; a.click(); URL.revokeObjectURL(url); }
+        var rows = records.map(function(r,i) {
+            return [i+1, '"'+r.value.replace(/"/g,'""')+'"', '"'+r.format+'"', '"'+r.ts+'"'];
+        });
+        var csv  = [header.join(',')].concat(rows.map(function(r){ return r.join(','); })).join('\r\n');
+        var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        var name = 'barcodes_' + new Date().toISOString().slice(0,10) + '.csv';
+        if (window.fs && window.fs.downloadFile) {
+            window.fs.downloadFile(blob, name);
+        } else {
+            var url  = URL.createObjectURL(blob);
+            var a    = document.createElement('a');
+            a.href = url; a.download = name; a.click();
+            URL.revokeObjectURL(url);
+        }
     }
 
     // ── Init ──────────────────────────────────────────────────────────────────
