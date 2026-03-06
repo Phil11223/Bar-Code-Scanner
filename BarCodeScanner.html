@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Barcode Scanner</title>
+    <!-- ZXing used on desktop only. Mobile uses native BarcodeDetector API. -->
     <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -32,6 +33,9 @@
             letter-spacing: 1px; color: #4cc9f0; margin-bottom: 14px;
         }
 
+        /* ── Scanner ──────────────────────────────────────────────────────────
+           One video element. One set of styles. No wildcards, no injection.
+           #camVideo is always in the DOM — both paths use it directly.     */
         #scanner-container {
             position: relative;
             width: 100%;
@@ -41,8 +45,9 @@
             overflow: hidden;
         }
         #camVideo {
-            width: 100%;
-            height: 100%;
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
             object-fit: cover;
             display: block;
         }
@@ -185,7 +190,21 @@
     var lastCode    = '';
     var lastTime    = 0;
     var COOLDOWN    = 3000;
-    var zxReader    = null;
+
+    // ── Engine selection ──────────────────────────────────────────────────────
+    // BarcodeDetector = Android Chrome 83+ — phone's own hardware barcode engine.
+    //                   Confirmed working for scanning in this session.
+    // ZXing           = desktop Chrome / Firefox / Safari.
+    //                   Confirmed working on laptop in this session.
+    var useNative = (typeof BarcodeDetector !== 'undefined');
+
+    // Native path vars
+    var nativeDetector = null;
+    var nativeStream   = null;
+    var nativeLoop     = null;
+
+    // ZXing path vars
+    var zxReader = null;
 
     // ── Persist ───────────────────────────────────────────────────────────────
     function loadData() {
@@ -204,61 +223,117 @@
         setStatus('loading', 'Starting camera...');
         document.getElementById('startBtn').style.display = 'none';
         document.getElementById('stopBtn').style.display  = '';
+        if (useNative) {
+            startNative();
+        } else {
+            startZXing();
+        }
+    }
 
-        // ── Two-step camera start ──────────────────────────────────────────────
-        // Step 1: getUserMedia directly — this is the ONLY reliable way to
-        //         trigger the permission popup on Android Chrome. Any ZXing
-        //         method that internally calls getUserMedia indirectly can
-        //         fail silently on mobile without showing the popup.
-        // Step 2: Hand the live stream to ZXing's decodeFromStream so it can
-        //         read barcodes from the video without managing the stream itself.
+    // ══════════════════════════════════════════════════════════════════════════
+    // MOBILE — Native BarcodeDetector (Android Chrome 83+)
+    //
+    // getUserMedia is called DIRECTLY — the only reliable way to trigger
+    // Android Chrome's camera permission popup from a button click.
+    // Stream is attached to #camVideo, then BarcodeDetector reads each frame.
+    // ══════════════════════════════════════════════════════════════════════════
+    function startNative() {
+        nativeDetector = new BarcodeDetector({
+            formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf']
+        });
+
         navigator.mediaDevices.getUserMedia({
+            audio: false,
             video: {
                 facingMode: { ideal: 'environment' },
                 width:  { ideal: 1280 },
                 height: { ideal: 720 }
-            },
-            audio: false
+            }
         }).then(function(stream) {
-
-            // Attach stream to our video element so it shows on screen
+            nativeStream = stream;
             var video = document.getElementById('camVideo');
             video.srcObject = stream;
-
-            // Create ZXing reader and point it at the already-live stream.
-            // decodeFromStream takes the MediaStream + video element — it does
-            // NOT call getUserMedia itself, so no second permission request.
-            zxReader = new ZXing.BrowserMultiFormatReader();
-            return zxReader.decodeFromStream(stream, video, function(result, err) {
-                if (!result) return;
-
-                var code = result.getText();
-                var fmt  = result.getBarcodeFormat();
-                var now  = Date.now();
-
-                if (!code || code.length < 3) return;
-                if (code === lastCode && (now - lastTime) < COOLDOWN) return;
-
-                lastCode = code; lastTime = now;
-                var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
-                commitScan(code, fmtName);
+            video.play().then(function() {
+                scanning = true;
+                setStatus('active', 'Scanning... point camera at barcode');
+                nativeScanFrame();
             });
-
-        }).then(function() {
-            scanning = true;
-            setStatus('active', 'Scanning... point camera at barcode');
         }).catch(function(err) {
             setStatus('error', 'Camera error: ' + err.message);
-            console.error('Scanner error:', err);
+            console.error('getUserMedia error:', err);
             document.getElementById('startBtn').style.display = '';
             document.getElementById('stopBtn').style.display  = 'none';
         });
     }
 
+    // requestAnimationFrame loop — asks BarcodeDetector to read each video frame
+    function nativeScanFrame() {
+        if (!scanning) return;
+        var video = document.getElementById('camVideo');
+        if (video.readyState >= 2 && video.videoWidth > 0) {
+            nativeDetector.detect(video).then(function(barcodes) {
+                if (barcodes.length > 0) {
+                    var bc  = barcodes[0];
+                    var now = Date.now();
+                    if (!(bc.rawValue === lastCode && (now - lastTime) < COOLDOWN)) {
+                        lastCode = bc.rawValue; lastTime = now;
+                        commitScan(bc.rawValue, bc.format);
+                    }
+                }
+            }).catch(function(){}).finally(function() {
+                if (scanning) nativeLoop = requestAnimationFrame(nativeScanFrame);
+            });
+        } else {
+            if (scanning) nativeLoop = requestAnimationFrame(nativeScanFrame);
+        }
+    }
+
+    function stopNative() {
+        if (nativeLoop)   { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
+        if (nativeStream) { nativeStream.getTracks().forEach(function(t){t.stop();}); nativeStream = null; }
+        document.getElementById('camVideo').srcObject = null;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // DESKTOP — ZXing (Chrome, Firefox, Safari)
+    //
+    // ZXing manages the stream via decodeFromConstraints.
+    // facingMode 'environment' is silently ignored on laptops with one camera.
+    // ══════════════════════════════════════════════════════════════════════════
+    function startZXing() {
+        // decodeFromVideoDevice(null, videoElementId, callback)
+        // null = use default camera (correct for laptops with one webcam).
+        // This was the confirmed-working fast desktop version from earlier.
+        zxReader = new ZXing.BrowserMultiFormatReader();
+        zxReader.decodeFromVideoDevice(null, 'camVideo', function(result, err) {
+                if (!result) return;
+                var code = result.getText();
+                var fmt  = result.getBarcodeFormat();
+                var now  = Date.now();
+                if (!code || code.length < 3) return;
+                if (code === lastCode && (now - lastTime) < COOLDOWN) return;
+                lastCode = code; lastTime = now;
+                var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
+                commitScan(code, fmtName);
+        }).then(function() {
+            scanning = true;
+            setStatus('active', 'Scanning... point camera at barcode');
+        }).catch(function(err) {
+            setStatus('error', 'Camera error: ' + err.message);
+            console.error('ZXing error:', err);
+            document.getElementById('startBtn').style.display = '';
+            document.getElementById('stopBtn').style.display  = 'none';
+        });
+    }
+
+    function stopZXing() {
+        if (zxReader) { zxReader.reset(); zxReader = null; }
+    }
+
     // ── Stop ──────────────────────────────────────────────────────────────────
     function stopScanner() {
         scanning = false;
-        if (zxReader) { zxReader.reset(); zxReader = null; }
+        if (useNative) { stopNative(); } else { stopZXing(); }
         lastCode = ''; lastTime = 0;
         document.getElementById('startBtn').style.display = '';
         document.getElementById('stopBtn').style.display  = 'none';
