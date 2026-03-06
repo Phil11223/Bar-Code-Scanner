@@ -182,6 +182,25 @@
         }
         #scanner-container.rescan-mode #tap-hint { color: #f4a261; }
 
+        /* ── Scan label (top-left overlay on video) ───────────────────────────
+           Shows "Scan [column header]" so the user always knows what they're
+           currently scanning. Colour matches the overlay border — blue for
+           primary, amber when in rescan/item mode.                           */
+        #scan-label {
+            position: absolute;
+            top: 10px; left: 10px;
+            background: rgba(0,0,0,0.6);
+            color: #4cc9f0;
+            font-size: 0.72rem; font-weight: 700; letter-spacing: 0.5px;
+            padding: 4px 10px;
+            border-radius: 20px;
+            pointer-events: none;
+            z-index: 15;
+            display: none;                    /* shown only when camera active */
+            transition: color 0.2s ease;
+        }
+        #scanner-container.rescan-mode #scan-label { color: #f4a261; }
+
         .flash { animation: cardFlash 0.7s ease forwards; }
         @keyframes cardFlash {
             0%   { box-shadow: 0 0 0 0px  rgba(45,198,83,0.9), 0 4px 20px rgba(0,0,0,0.4); }
@@ -354,6 +373,7 @@
         <div id="scan-flash"></div>
         <div id="tap-ripple"></div>
         <div id="tap-hint">TAP TO SCAN</div>
+        <div id="scan-label"></div>
     </div>
     <div id="confirm-banner"><span>&#10003;</span>&nbsp;<span id="confirm-text"></span></div>
     <div id="hint"></div>
@@ -484,6 +504,7 @@
             }
             renderTableHead();
             renderTable();
+            updateScanLabel();
         }, 0);
     }
 
@@ -527,6 +548,7 @@
         });
         closeRename();
         renderTableHead();
+        updateScanLabel();
         saveData();
     }
 
@@ -548,6 +570,7 @@
         }
 
         renderTable(); // re-render to highlight the selected cell
+        updateScanLabel();
     }
 
     function clearRescanTarget() {
@@ -558,6 +581,22 @@
             document.getElementById('tap-hint').textContent = 'TAP TO SCAN';
         }
         renderTable();
+        updateScanLabel();
+    }
+
+    // ── Scan label ───────────────────────────────────────────────────────────
+    // Computes the correct "Scan [header]" text based on current state and
+    // updates the top-left overlay on the video. Called wherever state changes.
+    function updateScanLabel() {
+        var el = document.getElementById('scan-label');
+        if (!scanning) { el.style.display = 'none'; return; }
+
+        // Which column are we about to scan?
+        // rescanTarget tells us if we are mid-row (overwrite or item chain).
+        // Otherwise we are scanning the primary column (value) for a new row.
+        var col = (rescanTarget !== null) ? rescanTarget.col : 'value';
+        el.textContent = 'Scan ' + colNames[col];
+        el.style.display = 'block';
     }
 
     // ── Start ─────────────────────────────────────────────────────────────────
@@ -592,6 +631,7 @@
                         scanning = true;
                         setStatus('active', 'Tap viewport to scan');
                         document.getElementById('tap-hint').style.display = 'block';
+                        updateScanLabel();
                         nativeScanFrame();
                     });
                 } else {
@@ -654,6 +694,7 @@
             scanning = true;
             setStatus('active', 'Tap viewport to scan');
             document.getElementById('tap-hint').style.display = 'block';
+            updateScanLabel();
         }).catch(function(err) {
             setStatus('error', 'Camera error: ' + err.message);
             console.error('ZXing error:', err);
@@ -675,6 +716,7 @@
         document.getElementById('stopBtn').style.display  = 'none';
         document.getElementById('confirm-banner').classList.remove('show');
         document.getElementById('tap-hint').style.display = 'none';
+        document.getElementById('scan-label').style.display = 'none';
         clearRescanTarget();
         setStatus('idle', 'Camera stopped');
         setHint('');
@@ -700,13 +742,29 @@
         }, 3000);
 
         if (rescanTarget !== null) {
-            // ── Rescan overwrite mode ────────────────────────────────────────
-            // Update the specific field on the targeted row, then exit rescan mode
+            // ── Rescan / item-chain overwrite ────────────────────────────────
+            // Write scanned value into the targeted field, then decide what next:
+            // If we just filled the 'item' column (end of chain) → clear target.
+            // If we just filled the 'value' column via manual rescan → clear too.
             records[rescanTarget.rowIdx][rescanTarget.col] = code;
+            renderTable(); saveData();
             clearRescanTarget();
         } else {
             // ── Normal new-record mode ───────────────────────────────────────
             addRecord(code, format);
+
+            // Auto-chain in multi-scan: after the primary (value) scan, immediately
+            // queue up scanning the item column on the same new row.
+            // The scanner stays in amber/rescan-mode; user just taps again.
+            if (multiScan) {
+                var newIdx = records.length - 1;
+                rescanTarget = { rowIdx: newIdx, col: 'item' };
+                document.getElementById('scanner-container').classList.add('rescan-mode');
+                document.getElementById('tap-hint').textContent = 'TAP TO RESCAN';
+                document.getElementById('rescan-prompt').style.display = 'block';
+                renderTable();   // highlight the new item cell
+                updateScanLabel();
+            }
         }
 
         setHint('');
