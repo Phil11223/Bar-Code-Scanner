@@ -33,9 +33,6 @@
             letter-spacing: 1px; color: #4cc9f0; margin-bottom: 14px;
         }
 
-        /* ── Scanner ──────────────────────────────────────────────────────────
-           One video element. One set of styles. No wildcards, no injection.
-           #camVideo is always in the DOM — both paths use it directly.     */
         #scanner-container {
             position: relative;
             width: 100%;
@@ -43,6 +40,41 @@
             background: #000;
             border-radius: 12px;
             overflow: hidden;
+            cursor: crosshair;  /* signals the viewport is tappable */
+        }
+
+        /* Tap ripple — brief white pulse from tap point to confirm the gesture */
+        #tap-ripple {
+            position: absolute;
+            width: 60px; height: 60px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.3);
+            transform: translate(-50%, -50%) scale(0);
+            pointer-events: none;
+            z-index: 20;
+        }
+        #tap-ripple.burst {
+            animation: rippleBurst 0.4s ease-out forwards;
+        }
+        @keyframes rippleBurst {
+            0%   { transform: translate(-50%, -50%) scale(0); opacity: 1; }
+            100% { transform: translate(-50%, -50%) scale(3); opacity: 0; }
+        }
+
+        /* "TAP TO SCAN" label inside the viewport */
+        #tap-hint {
+            position: absolute;
+            bottom: 10px; left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.55);
+            color: #4cc9f0;
+            font-size: 0.75rem; font-weight: 700;
+            letter-spacing: 1px;
+            padding: 4px 14px;
+            border-radius: 20px;
+            pointer-events: none;
+            z-index: 15;
+            display: none;  /* shown only when camera is active */
         }
         #camVideo {
             position: absolute;
@@ -146,6 +178,8 @@
         <video id="camVideo" autoplay muted playsinline></video>
         <div class="scan-overlay"><div class="scan-line"></div></div>
         <div id="scan-flash"></div>
+        <div id="tap-ripple"></div>
+        <div id="tap-hint">TAP TO SCAN</div>
     </div>
     <div id="confirm-banner"><span>&#10003;</span>&nbsp;<span id="confirm-text"></span></div>
     <div id="hint"></div>
@@ -191,20 +225,43 @@
     var lastTime    = 0;
     var COOLDOWN    = 3000;
 
-    // ── Engine selection ──────────────────────────────────────────────────────
-    // BarcodeDetector = Android Chrome 83+ — phone's own hardware barcode engine.
-    //                   Confirmed working for scanning in this session.
-    // ZXing           = desktop Chrome / Firefox / Safari.
-    //                   Confirmed working on laptop in this session.
+    // BarcodeDetector = Android Chrome 83+ (confirmed scanning)
+    // ZXing           = desktop Chrome / Firefox / Safari (confirmed scanning)
     var useNative = (typeof BarcodeDetector !== 'undefined');
 
-    // Native path vars
     var nativeDetector = null;
     var nativeStream   = null;
     var nativeLoop     = null;
+    var zxReader       = null;
 
-    // ZXing path vars
-    var zxReader = null;
+    // ── Tap-to-scan gate ──────────────────────────────────────────────────────
+    // Scan loops run continuously but only commit when tapPending = true.
+    // A tap on #scanner-container sets the flag; it clears after one commit.
+    var tapPending = false;
+
+    // Set up tap listener on the scanner viewport (not the buttons).
+    // Uses both click and touchend to work on desktop and mobile.
+    // stopPropagation is NOT used — events still reach children normally.
+    document.addEventListener('DOMContentLoaded', function() {
+        var container = document.getElementById('scanner-container');
+        function onTap(e) {
+            if (!scanning) return;              // ignore taps before camera starts
+            tapPending = true;
+
+            // Show ripple at tap position
+            var rect   = container.getBoundingClientRect();
+            var cx     = (e.changedTouches ? e.changedTouches[0].clientX : e.clientX) - rect.left;
+            var cy     = (e.changedTouches ? e.changedTouches[0].clientY : e.clientY) - rect.top;
+            var ripple = document.getElementById('tap-ripple');
+            ripple.style.left = cx + 'px';
+            ripple.style.top  = cy + 'px';
+            ripple.classList.remove('burst');
+            void ripple.offsetWidth;
+            ripple.classList.add('burst');
+        }
+        container.addEventListener('click',     onTap);
+        container.addEventListener('touchend',  onTap, { passive: true });
+    });
 
     // ── Persist ───────────────────────────────────────────────────────────────
     function loadData() {
@@ -223,19 +280,11 @@
         setStatus('loading', 'Starting camera...');
         document.getElementById('startBtn').style.display = 'none';
         document.getElementById('stopBtn').style.display  = '';
-        if (useNative) {
-            startNative();
-        } else {
-            startZXing();
-        }
+        if (useNative) { startNative(); } else { startZXing(); }
     }
 
     // ══════════════════════════════════════════════════════════════════════════
     // MOBILE — Native BarcodeDetector (Android Chrome 83+)
-    //
-    // getUserMedia is called DIRECTLY — the only reliable way to trigger
-    // Android Chrome's camera permission popup from a button click.
-    // Stream is attached to #camVideo, then BarcodeDetector reads each frame.
     // ══════════════════════════════════════════════════════════════════════════
     function startNative() {
         nativeDetector = new BarcodeDetector({
@@ -253,33 +302,32 @@
             nativeStream = stream;
             var video = document.getElementById('camVideo');
             video.srcObject = stream;
+            video.play();
 
-            // ── Black video fix ────────────────────────────────────────────────
-            // On Android Chrome, video.play() resolves BEFORE the first frame is
-            // painted — the video element exists but renders black. The lock/unlock
-            // workaround users were doing forced a browser repaint that fixed it.
-            //
-            // Fix: listen to the 'playing' event instead of play().then().
-            // 'playing' fires only when actual pixel frames are being rendered.
-            // Then force a reflow (toggle display) to flush Android's render pipeline.
-            video.addEventListener('playing', function onPlaying() {
-                video.removeEventListener('playing', onPlaying);
+            // ── Black screen fix ───────────────────────────────────────────────
+            // Android Chrome's GPU compositor doesn't flush the video texture
+            // until videoWidth > 0 — meaning real decoded frames exist in memory.
+            // We poll via rAF until that moment, then nudge the opacity to force
+            // the compositor to push the frame to screen. This is what lock/unlock
+            // was doing manually — we replicate it programmatically.
+            function waitForFrame() {
+                if (video.videoWidth > 0) {
+                    // Frames are decoded — force GPU compositor flush
+                    video.style.opacity = '0.99';
+                    requestAnimationFrame(function() {
+                        video.style.opacity = '1';
+                        scanning = true;
+                        setStatus('active', 'Tap viewport to scan');
+                        document.getElementById('tap-hint').style.display = 'block';
+                        nativeScanFrame();
+                    });
+                } else {
+                    // Not ready yet — keep polling (usually resolves in <500ms)
+                    requestAnimationFrame(waitForFrame);
+                }
+            }
+            requestAnimationFrame(waitForFrame);
 
-                // Force a reflow — flushes Android Chrome's stale render state
-                video.style.display = 'none';
-                video.offsetHeight;          // reading offsetHeight forces a reflow
-                video.style.display = 'block';
-
-                scanning = true;
-                setStatus('active', 'Scanning... point camera at barcode');
-                nativeScanFrame();
-            });
-
-            video.play().catch(function(err) {
-                setStatus('error', 'Video error: ' + err.message);
-                document.getElementById('startBtn').style.display = '';
-                document.getElementById('stopBtn').style.display  = 'none';
-            });
         }).catch(function(err) {
             setStatus('error', 'Camera error: ' + err.message);
             console.error('getUserMedia error:', err);
@@ -288,13 +336,14 @@
         });
     }
 
-    // requestAnimationFrame loop — asks BarcodeDetector to read each video frame
     function nativeScanFrame() {
         if (!scanning) return;
         var video = document.getElementById('camVideo');
         if (video.readyState >= 2 && video.videoWidth > 0) {
             nativeDetector.detect(video).then(function(barcodes) {
-                if (barcodes.length > 0) {
+                // Only commit when user has tapped the viewport
+                if (barcodes.length > 0 && tapPending) {
+                    tapPending = false;   // consume the tap — one tap, one scan
                     var bc  = barcodes[0];
                     var now = Date.now();
                     if (!(bc.rawValue === lastCode && (now - lastTime) < COOLDOWN)) {
@@ -318,28 +367,25 @@
 
     // ══════════════════════════════════════════════════════════════════════════
     // DESKTOP — ZXing (Chrome, Firefox, Safari)
-    //
-    // ZXing manages the stream via decodeFromConstraints.
-    // facingMode 'environment' is silently ignored on laptops with one camera.
+    // decodeFromVideoDevice(null, ...) confirmed fast and working on laptop.
     // ══════════════════════════════════════════════════════════════════════════
     function startZXing() {
-        // decodeFromVideoDevice(null, videoElementId, callback)
-        // null = use default camera (correct for laptops with one webcam).
-        // This was the confirmed-working fast desktop version from earlier.
         zxReader = new ZXing.BrowserMultiFormatReader();
         zxReader.decodeFromVideoDevice(null, 'camVideo', function(result, err) {
-                if (!result) return;
-                var code = result.getText();
-                var fmt  = result.getBarcodeFormat();
-                var now  = Date.now();
-                if (!code || code.length < 3) return;
-                if (code === lastCode && (now - lastTime) < COOLDOWN) return;
-                lastCode = code; lastTime = now;
-                var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
-                commitScan(code, fmtName);
+            // Only commit when user has tapped the viewport
+            if (!result || !tapPending) return;
+            tapPending = false;   // consume the tap — one tap, one scan
+            var code = result.getText();
+            var fmt  = result.getBarcodeFormat();
+            var now  = Date.now();
+            if (!code || code.length < 3) return;
+            if (code === lastCode && (now - lastTime) < COOLDOWN) return;
+            lastCode = code; lastTime = now;
+            var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
+            commitScan(code, fmtName);
         }).then(function() {
             scanning = true;
-            setStatus('active', 'Scanning... point camera at barcode');
+            setStatus('active', 'Tap viewport to scan');
         }).catch(function(err) {
             setStatus('error', 'Camera error: ' + err.message);
             console.error('ZXing error:', err);
@@ -360,6 +406,8 @@
         document.getElementById('startBtn').style.display = '';
         document.getElementById('stopBtn').style.display  = 'none';
         document.getElementById('confirm-banner').classList.remove('show');
+        tapPending = false;
+        document.getElementById('tap-hint').style.display = 'none';
         setStatus('idle', 'Camera stopped');
         setHint('');
     }
