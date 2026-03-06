@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Barcode Scanner</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -20,7 +21,6 @@
             border-left: 4px solid #4cc9f0;
         }
         header h1 { font-size: 1.2rem; color: #4cc9f0; }
-
         .card {
             width: 100%; max-width: 600px; background: #16213e;
             border-radius: 16px; padding: 20px; margin-bottom: 16px;
@@ -31,18 +31,23 @@
             letter-spacing: 1px; color: #4cc9f0; margin-bottom: 14px;
         }
 
-        /* ── Scanner viewport ─────────────────────────────────────────────── */
+        /* ── Scanner viewport ───────────────────────────────────────────────
+           IMPORTANT: Only <video> is stretched to fill.
+           Quagga injects a <canvas> for internal processing — if we force
+           that canvas to 100% it warps the pixel grid and breaks detection.
+           We hide it and use our own visual overlay instead.               */
         #scanner-container {
             position: relative; width: 100%;
             border-radius: 12px; overflow: hidden;
             background: #000; aspect-ratio: 4/3;
         }
-        #camVideo {
-            width: 100%; height: 100%;
-            object-fit: cover; display: block;
+        #scanner-container video {
+            width: 100% !important; height: 100% !important;
+            object-fit: cover; position: absolute; top: 0; left: 0;
         }
+        #scanner-container canvas { display: none; }
 
-        /* Scan guide strip */
+        /* Scan guide strip with animated line */
         .scan-overlay {
             position: absolute; top: 50%; left: 50%;
             transform: translate(-50%, -50%);
@@ -58,7 +63,7 @@
         }
         @keyframes scanLine { 0%{top:0} 100%{top:100%} }
 
-        /* Green viewport flash on commit */
+        /* Green viewport flash on successful scan */
         #scan-flash {
             position: absolute; inset: 0;
             background: rgba(45,198,83,0.35);
@@ -67,7 +72,7 @@
         #scan-flash.pop { animation: flashPop 0.5s ease forwards; }
         @keyframes flashPop { 0%{opacity:1} 100%{opacity:0} }
 
-        /* Card border pulse */
+        /* Card border pulse on successful scan */
         .flash { animation: cardFlash 0.7s ease forwards; }
         @keyframes cardFlash {
             0%   { box-shadow: 0 0 0 0px  rgba(45,198,83,0.9), 0 4px 20px rgba(0,0,0,0.4); }
@@ -92,9 +97,8 @@
         #hint { font-size:0.78rem; color:#888; margin-top:6px; min-height:1.4em; text-align:center; }
 
         .status-bar {
-            display:flex; align-items:center; gap:8px;
-            padding:10px 14px; border-radius:8px;
-            font-size:0.85rem; margin-top:12px; background:#0f3460;
+            display:flex; align-items:center; gap:8px; padding:10px 14px;
+            border-radius:8px; font-size:0.85rem; margin-top:12px; background:#0f3460;
         }
         .dot { width:10px; height:10px; border-radius:50%; background:#888; flex-shrink:0; }
         .dot.active { background:#2dc653; animation:pulse 1s infinite; }
@@ -139,7 +143,10 @@
 <div class="card" id="cameraCard">
     <h2>&#128247; Camera Scanner</h2>
     <div id="scanner-container">
-        <video id="camVideo" autoplay muted playsinline></video>
+        <!-- Native engine uses this video directly.
+             Quagga injects its own video into this container. -->
+        <video id="nativeVideo" autoplay muted playsinline
+               style="display:none;width:100%;height:100%;object-fit:cover;position:absolute;top:0;left:0;"></video>
         <div class="scan-overlay"><div class="scan-line"></div></div>
         <div id="scan-flash"></div>
     </div>
@@ -184,14 +191,28 @@
     var records     = [];
     var scanning    = false;
     var bannerTimer = null;
-    var frameLoop   = null;   // requestAnimationFrame ID
-    var stream      = null;   // MediaStream reference for cleanup
-    var detector    = null;   // BarcodeDetector instance
-
-    // Duplicate prevention
     var lastCode    = '';
     var lastTime    = 0;
-    var COOLDOWN    = 3000;   // ms — same code ignored for 3 seconds
+    var COOLDOWN    = 3000;   // same code ignored for 3s after logging
+
+    // Native engine state
+    var nativeStream = null;
+    var nativeLoop   = null;
+    var detector     = null;
+
+    // ── Engine selection ──────────────────────────────────────────────────────
+    // BarcodeDetector exists in BOTH Android Chrome AND desktop Chrome 88+.
+    // But it performs reliably only on Android (hardware acceleration).
+    // Desktop Chrome runs it in software and it can be unreliable with webcams.
+    // So: Android → native BarcodeDetector, everything else → Quagga.
+    //
+    // numOfWorkers for Quagga:
+    //   Desktop → 2  (Web Workers work well, gives parallel decode threads)
+    //   Mobile fallback → 0  (Workers unreliable on Android, sync is better)
+    var isAndroid  = /Android/i.test(navigator.userAgent);
+    var isMobile   = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    var useNative  = isAndroid && ('BarcodeDetector' in window);
+    var workers    = isMobile ? 0 : 2;
 
     // ── Persist ───────────────────────────────────────────────────────────────
     function loadData() {
@@ -205,124 +226,170 @@
         try { window.db.set('barcode_records', { records: records }); } catch(e) {}
     }
 
-    // ── Start scanner ─────────────────────────────────────────────────────────
-    // Uses the native BarcodeDetector API (built into Android Chrome 83+).
-    // This is the phone's own barcode engine — no JS library needed, much
-    // faster and more reliable than Quagga on mobile devices.
+    // ── Start — routes to the right engine ───────────────────────────────────
     function startScanner() {
-        // Check browser support
-        if (!('BarcodeDetector' in window)) {
-            setStatus('error', 'BarcodeDetector not supported — try Chrome on Android');
-            setHint('Your browser does not support the native BarcodeDetector API.');
-            return;
-        }
-
         setStatus('loading', 'Starting camera...');
         document.getElementById('startBtn').style.display = 'none';
         document.getElementById('stopBtn').style.display  = '';
-
-        // Create detector for all common 1D barcode formats
-        // The native API handles format detection automatically
-        detector = new BarcodeDetector({
-            formats: [
-                'ean_13',     // standard 13-digit product codes
-                'ean_8',      // short variant (rare, tiny packaging)
-                'upc_a',      // North American 12-digit
-                'upc_e',      // compressed UPC
-                'code_128',   // retail, warehouse, shipping
-                'code_39',    // industrial
-                'code_93',    // industrial dense
-                'codabar',    // libraries, blood banks
-                'itf'         // interleaved 2 of 5
-            ]
-        });
-
-        // Request rear camera
-        navigator.mediaDevices.getUserMedia({
-            video: {
-                facingMode: { ideal: 'environment' },
-                width:  { ideal: 1280 },
-                height: { ideal: 720 }
-            }
-        }).then(function(mediaStream) {
-            stream = mediaStream;
-            var video = document.getElementById('camVideo');
-            video.srcObject = mediaStream;
-
-            // Wait for video to be ready before starting frame loop
-            video.onloadedmetadata = function() {
-                video.play();
-                scanning = true;
-                setStatus('active', 'Scanning... point camera at barcode');
-                scanFrame();
-            };
-        }).catch(function(err) {
-            setStatus('error', 'Camera error: ' + err.message);
-            document.getElementById('startBtn').style.display = '';
-            document.getElementById('stopBtn').style.display  = 'none';
-        });
-    }
-
-    // ── Frame scanning loop ───────────────────────────────────────────────────
-    // requestAnimationFrame fires ~60fps. BarcodeDetector.detect() is async
-    // and uses the phone's hardware barcode engine — it's fast and accurate.
-    // Think of it as asking the phone to read the frame natively, rather than
-    // running a JS algorithm on each pixel like Quagga did.
-    function scanFrame() {
-        if (!scanning) return;
-
-        var video = document.getElementById('camVideo');
-
-        // Only detect when video is actually playing
-        if (video.readyState === video.HAVE_ENOUGH_DATA) {
-            detector.detect(video).then(function(barcodes) {
-                if (barcodes.length > 0) {
-                    // Take the first detected barcode
-                    var bc     = barcodes[0];
-                    var code   = bc.rawValue;
-                    var format = bc.format;
-                    var now    = Date.now();
-
-                    // Ignore same code within cooldown window
-                    if (code === lastCode && (now - lastTime) < COOLDOWN) {
-                        frameLoop = requestAnimationFrame(scanFrame);
-                        return;
-                    }
-
-                    lastCode = code;
-                    lastTime = now;
-                    commitScan(code, format);
-                }
-            }).catch(function() {
-                // detect() can throw on some frames — just continue
-            }).finally(function() {
-                frameLoop = requestAnimationFrame(scanFrame);
-            });
+        if (useNative) {
+            startNative();
         } else {
-            frameLoop = requestAnimationFrame(scanFrame);
+            startQuagga();
         }
     }
 
-    // ── Commit ────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════════
+    // ENGINE A — Native BarcodeDetector (Android Chrome only)
+    // Uses the phone's hardware barcode engine via requestAnimationFrame loop.
+    // Much faster and more accurate than JS on mobile hardware.
+    // ═════════════════════════════════════════════════════════════════════════
+    function startNative() {
+        detector = new BarcodeDetector({
+            formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf']
+        });
+
+        navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal:'environment' }, width:{ideal:1280}, height:{ideal:720} }
+        }).then(function(stream) {
+            nativeStream = stream;
+            var vid = document.getElementById('nativeVideo');
+            vid.style.display = '';
+            vid.srcObject = stream;
+            vid.onloadedmetadata = function() {
+                vid.play();
+                scanning = true;
+                setStatus('active', 'Scanning...');
+                nativeScanLoop();
+            };
+        }).catch(function(err) {
+            // Native failed — fall back to Quagga
+            console.error('Native camera failed, falling back to Quagga:', err);
+            useNative = false;
+            workers   = 0;
+            startQuagga();
+        });
+    }
+
+    function nativeScanLoop() {
+        if (!scanning) return;
+        var vid = document.getElementById('nativeVideo');
+        if (vid.readyState === vid.HAVE_ENOUGH_DATA) {
+            detector.detect(vid).then(function(barcodes) {
+                if (barcodes.length > 0) {
+                    var bc  = barcodes[0];
+                    var now = Date.now();
+                    if (!(bc.rawValue === lastCode && now - lastTime < COOLDOWN)) {
+                        lastCode = bc.rawValue;
+                        lastTime = now;
+                        commitScan(bc.rawValue, bc.format);
+                    }
+                }
+            }).catch(function(){}).finally(function() {
+                nativeLoop = requestAnimationFrame(nativeScanLoop);
+            });
+        } else {
+            nativeLoop = requestAnimationFrame(nativeScanLoop);
+        }
+    }
+
+    function stopNative() {
+        scanning = false;
+        if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
+        if (nativeStream) { nativeStream.getTracks().forEach(function(t){ t.stop(); }); nativeStream = null; }
+        var vid = document.getElementById('nativeVideo');
+        vid.srcObject = null;
+        vid.style.display = 'none';
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // ENGINE B — Quagga (desktop, iOS, Firefox, older Android)
+    // JS-based barcode processing. Works on any browser with getUserMedia.
+    //
+    // Reader list is critical for correct values:
+    //   ean_reader   → handles EAN-13 AND UPC-A, returns full printed digits
+    //   ean_8_reader → EXCLUDED: reads 8-digit sub-window of EAN-13 barcodes
+    //   upc_reader   → EXCLUDED: strips leading 0 from EAN-13, wrong value
+    //   i2of5_reader → EXCLUDED: no checksum, produces ghost reads
+    // ═════════════════════════════════════════════════════════════════════════
+    function startQuagga() {
+        Quagga.init({
+            inputStream: {
+                name: 'Live',
+                type: 'LiveStream',
+                target: document.getElementById('scanner-container'),
+                constraints: {
+                    facingMode: 'environment',
+                    width:  { ideal: 1280 },
+                    height: { ideal: 720 }
+                }
+            },
+            decoder: {
+                readers: [
+                    'ean_reader',       // EAN-13 + UPC-A — full printed value
+                    'code_128_reader',  // retail, warehouse, shipping
+                    'code_39_reader',   // industrial, automotive
+                    'codabar_reader'    // libraries, blood banks
+                ]
+            },
+            locate:       true,
+            numOfWorkers: workers,  // 2 on desktop (parallel), 0 on mobile (sync)
+            frequency:    10
+        }, function(err) {
+            if (err) {
+                setStatus('error', 'Camera error: ' + err.message);
+                console.error('Quagga init failed:', err);
+                document.getElementById('startBtn').style.display = '';
+                document.getElementById('stopBtn').style.display  = 'none';
+                return;
+            }
+            Quagga.start();
+            scanning = true;
+            setStatus('active', 'Scanning...');
+            Quagga.onDetected(quaggaDetected);
+        });
+    }
+
+    function quaggaDetected(result) {
+        var code   = result.codeResult.code;
+        var format = result.codeResult.format;
+        var now    = Date.now();
+        if (!code || code.length < 3) return;
+        if (code === lastCode && now - lastTime < COOLDOWN) return;
+        // ean_reader can return 12 digits on UPC-A barcodes.
+        // The number printed on the product is always 13 — pad it.
+        if (format === 'ean_13' && code.length === 12) code = '0' + code;
+        lastCode = code; lastTime = now;
+        commitScan(code, format);
+    }
+
+    function stopQuagga() {
+        Quagga.offDetected(quaggaDetected);
+        Quagga.stop();
+        scanning = false;
+    }
+
+    // ── Stop — routes to the right engine ────────────────────────────────────
+    function stopScanner() {
+        if (useNative) { stopNative(); } else { stopQuagga(); }
+        lastCode = ''; lastTime = 0;
+        document.getElementById('startBtn').style.display = '';
+        document.getElementById('stopBtn').style.display  = 'none';
+        document.getElementById('confirm-banner').classList.remove('show');
+        setStatus('idle', 'Camera stopped');
+        setHint('');
+    }
+
+    // ── Commit — shared by both engines ──────────────────────────────────────
     function commitScan(code, format) {
-        // Green flash on viewport
         var fl = document.getElementById('scan-flash');
-        fl.classList.remove('pop');
-        void fl.offsetWidth;
-        fl.classList.add('pop');
+        fl.classList.remove('pop'); void fl.offsetWidth; fl.classList.add('pop');
 
-        // Green pulse on card border
         var card = document.getElementById('cameraCard');
-        card.classList.remove('flash');
-        void card.offsetWidth;
-        card.classList.add('flash');
+        card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash');
 
-        // Confirmation banner with the real barcode value
         document.getElementById('confirm-text').textContent = code + '  (' + format + ')';
         var banner = document.getElementById('confirm-banner');
-        banner.classList.remove('show');
-        void banner.offsetWidth;
-        banner.classList.add('show');
+        banner.classList.remove('show'); void banner.offsetWidth; banner.classList.add('show');
         clearTimeout(bannerTimer);
         bannerTimer = setTimeout(function() {
             document.getElementById('confirm-banner').classList.remove('show');
@@ -332,31 +399,7 @@
         addRecord(code, format);
     }
 
-    // ── Stop ──────────────────────────────────────────────────────────────────
-    function stopScanner() {
-        scanning = false;
-
-        // Cancel the frame loop
-        if (frameLoop) { cancelAnimationFrame(frameLoop); frameLoop = null; }
-
-        // Stop all camera tracks and release the camera
-        if (stream) {
-            stream.getTracks().forEach(function(t) { t.stop(); });
-            stream = null;
-        }
-
-        var video = document.getElementById('camVideo');
-        video.srcObject = null;
-
-        lastCode = ''; lastTime = 0;
-        document.getElementById('startBtn').style.display = '';
-        document.getElementById('stopBtn').style.display  = 'none';
-        document.getElementById('confirm-banner').classList.remove('show');
-        setStatus('idle', 'Camera stopped');
-        setHint('');
-    }
-
-    // ── UI helpers ────────────────────────────────────────────────────────────
+    // ── UI ────────────────────────────────────────────────────────────────────
     function setStatus(type, msg) {
         var dot = document.getElementById('statusDot');
         dot.className = 'dot';
@@ -398,13 +441,7 @@
             return;
         }
         tbody.innerHTML = records.map(function(r,i) {
-            return '<tr>' +
-                '<td>'+(i+1)+'</td>' +
-                '<td><strong>'+esc(r.value)+'</strong></td>' +
-                '<td>'+esc(r.format)+'</td>' +
-                '<td>'+esc(r.ts)+'</td>' +
-                '<td><button class="del-btn" onclick="deleteRecord('+i+')">&#10005;</button></td>' +
-                '</tr>';
+            return '<tr><td>'+(i+1)+'</td><td><strong>'+esc(r.value)+'</strong></td><td>'+esc(r.format)+'</td><td>'+esc(r.ts)+'</td><td><button class="del-btn" onclick="deleteRecord('+i+')">&#10005;</button></td></tr>';
         }).join('');
     }
     function esc(s) {
@@ -413,26 +450,14 @@
 
     // ── CSV ───────────────────────────────────────────────────────────────────
     function downloadCSV() {
-        if (!records.length) {
-            setStatus('error','Nothing to export!');
-            setTimeout(function(){ setStatus('idle',''); },2000);
-            return;
-        }
+        if (!records.length) { setStatus('error','Nothing to export!'); setTimeout(function(){ setStatus('idle',''); },2000); return; }
         var header = ['#','Barcode Value','Format','Timestamp'];
-        var rows = records.map(function(r,i) {
-            return [i+1,'"'+r.value.replace(/"/g,'""')+'"','"'+r.format+'"','"'+r.ts+'"'];
-        });
+        var rows = records.map(function(r,i){ return [i+1,'"'+r.value.replace(/"/g,'""')+'"','"'+r.format+'"','"'+r.ts+'"']; });
         var csv  = [header.join(',')].concat(rows.map(function(r){return r.join(',');})).join('\r\n');
         var blob = new Blob([csv],{type:'text/csv;charset=utf-8;'});
         var name = 'barcodes_'+new Date().toISOString().slice(0,10)+'.csv';
-        if (window.fs && window.fs.downloadFile) {
-            window.fs.downloadFile(blob, name);
-        } else {
-            var url = URL.createObjectURL(blob);
-            var a   = document.createElement('a');
-            a.href = url; a.download = name; a.click();
-            URL.revokeObjectURL(url);
-        }
+        if (window.fs && window.fs.downloadFile) { window.fs.downloadFile(blob,name); }
+        else { var url=URL.createObjectURL(blob); var a=document.createElement('a'); a.href=url; a.download=name; a.click(); URL.revokeObjectURL(url); }
     }
 
     // ── Init ──────────────────────────────────────────────────────────────────
