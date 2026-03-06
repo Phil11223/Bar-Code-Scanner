@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Barcode Scanner → CSV</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: #1a1a2e; color: #eee;
+            min-height: 100vh; display: flex;
+            flex-direction: column; align-items: center; padding: 16px;
+        }
+        header {
+            width: 100%; max-width: 600px;
+            display: flex; align-items: center; gap: 12px;
+            margin-bottom: 20px; padding: 12px 16px;
+            background: #16213e; border-radius: 12px;
+            border-left: 4px solid #4cc9f0;
+        }
+        header h1 { font-size: 1.2rem; color: #4cc9f0; }
+        .card {
+            width: 100%; max-width: 600px; background: #16213e;
+            border-radius: 16px; padding: 20px; margin-bottom: 16px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+        }
+        .card h2 {
+            font-size: 0.95rem; text-transform: uppercase;
+            letter-spacing: 1px; color: #4cc9f0; margin-bottom: 14px;
+        }
+
+        /* ── Scanner container ──────────────────────────────────────────────
+           Only <video> is stretched to fill. Quagga's injected <canvas>
+           must NOT be forced to 100% — that warps its internal coordinate
+           grid and breaks barcode location detection entirely.             */
+        #scanner-container {
+            position: relative; width: 100%;
+            border-radius: 12px; overflow: hidden;
+            background: #000; aspect-ratio: 4/3;
+        }
+        #scanner-container video {
+            width: 100% !important; height: 100% !important;
+            object-fit: cover; position: absolute; top: 0; left: 0;
+        }
+        #scanner-container canvas { display: none; }
+
+        /* Scan guide overlay */
+        .scan-overlay {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 85%; height: 35%;
+            border: 2px solid #4cc9f0; border-radius: 6px;
+            box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);
+            z-index: 10; pointer-events: none;
+        }
+        .scan-line {
+            position: absolute; width: 100%; height: 2px;
+            background: linear-gradient(90deg, transparent, #4cc9f0, transparent);
+            animation: scanLine 1.5s ease-in-out infinite; top: 0;
+        }
+        @keyframes scanLine { 0%{top:0} 100%{top:100%} }
+
+        /* Green viewport flash */
+        #scan-flash {
+            position: absolute; inset: 0;
+            background: rgba(45,198,83,0.35);
+            z-index: 30; pointer-events: none; opacity: 0;
+        }
+        #scan-flash.pop { animation: flashPop 0.5s ease forwards; }
+        @keyframes flashPop { 0%{opacity:1} 100%{opacity:0} }
+
+        /* Card border pulse */
+        .flash { animation: cardFlash 0.7s ease forwards; }
+        @keyframes cardFlash {
+            0%   { box-shadow: 0 0 0 0px  rgba(45,198,83,0.9), 0 4px 20px rgba(0,0,0,0.4); }
+            40%  { box-shadow: 0 0 0 10px rgba(45,198,83,0.5), 0 4px 20px rgba(0,0,0,0.4); }
+            100% { box-shadow: 0 0 0 0px  rgba(45,198,83,0),   0 4px 20px rgba(0,0,0,0.4); }
+        }
+
+        /* Confirmation banner */
+        #confirm-banner {
+            display: none; align-items: center; gap: 10px;
+            margin-top: 10px; padding: 10px 14px;
+            background: #1a4d2e; border: 1px solid #2dc653;
+            border-radius: 8px; font-size: 0.88rem;
+            color: #2dc653; font-weight: 600;
+        }
+        #confirm-banner.show { display: flex; animation: bannerSlide 0.25s ease; }
+        @keyframes bannerSlide {
+            from { opacity:0; transform:translateY(-5px); }
+            to   { opacity:1; transform:translateY(0); }
+        }
+
+        #hint { font-size:0.78rem; color:#888; margin-top:6px; min-height:1.4em; text-align:center; }
+
+        .status-bar {
+            display:flex; align-items:center; gap:8px;
+            padding:10px 14px; border-radius:8px;
+            font-size:0.85rem; margin-top:12px; background:#0f3460;
+        }
+        .dot { width:10px; height:10px; border-radius:50%; background:#888; flex-shrink:0; }
+        .dot.active { background:#2dc653; animation:pulse 1s infinite; }
+        .dot.error  { background:#e63946; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+        .btn-row { display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }
+        button { flex:1; padding:12px 16px; border:none; border-radius:10px; font-size:0.9rem; font-weight:600; cursor:pointer; transition:all 0.2s; }
+        #startBtn    { background:#4cc9f0; color:#1a1a2e; }
+        #startBtn:hover { background:#3ab8df; }
+        #stopBtn     { background:#e63946; color:#fff; display:none; }
+        #stopBtn:hover  { background:#c1121f; }
+        #clearBtn    { background:#444; color:#eee; }
+        #clearBtn:hover { background:#555; }
+        #downloadBtn { background:#2dc653; color:#fff; }
+        #downloadBtn:hover { background:#25a244; }
+
+        .manual-row { display:flex; gap:8px; margin-top:4px; }
+        .manual-row input { flex:1; padding:10px 14px; border-radius:8px; border:1px solid #333; background:#0f3460; color:#eee; font-size:0.9rem; outline:none; }
+        .manual-row input:focus { border-color:#4cc9f0; }
+        .manual-row button { flex:0 0 auto; padding:10px 18px; background:#4cc9f0; color:#1a1a2e; }
+
+        .table-wrap { overflow-x:auto; border-radius:8px; }
+        table { width:100%; border-collapse:collapse; font-size:0.85rem; }
+        thead th { background:#0f3460; color:#4cc9f0; padding:10px 12px; text-align:left; font-weight:600; }
+        tbody tr:nth-child(even) { background:rgba(255,255,255,0.03); }
+        tbody tr:hover { background:rgba(76,201,240,0.08); }
+        tbody td { padding:9px 12px; border-bottom:1px solid rgba(255,255,255,0.05); word-break:break-all; }
+        .del-btn { background:transparent; border:1px solid #e63946; color:#e63946; padding:4px 10px; font-size:0.75rem; border-radius:6px; cursor:pointer; }
+        .del-btn:hover { background:#e63946; color:#fff; }
+        .empty-msg { text-align:center; color:#666; padding:24px; font-size:0.9rem; }
+        .badge { display:inline-block; background:#4cc9f0; color:#1a1a2e; border-radius:20px; padding:2px 10px; font-size:0.75rem; font-weight:700; margin-left:8px; }
+    </style>
+</head>
+<body>
+
+<header>
+    <div style="width:32px;height:32px;background:#4cc9f0;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:900;color:#1a1a2e;font-size:1rem;">T</div>
+    <h1>Barcode Scanner &rarr; CSV &nbsp;<span style="font-size:0.75rem;color:#888;">FueliX</span></h1>
+</header>
+
+<div class="card" id="cameraCard">
+    <h2>&#128247; Camera Scanner</h2>
+    <div id="scanner-container">
+        <div class="scan-overlay"><div class="scan-line"></div></div>
+        <div id="scan-flash"></div>
+    </div>
+    <div id="confirm-banner"><span>&#10003;</span>&nbsp;<span id="confirm-text"></span></div>
+    <div id="hint"></div>
+    <div class="status-bar">
+        <div class="dot" id="statusDot"></div>
+        <span id="statusText">Camera not started</span>
+    </div>
+    <div class="btn-row">
+        <button id="startBtn" onclick="startScanner()">&#9654; Start Camera</button>
+        <button id="stopBtn"  onclick="stopScanner()">&#9209; Stop Camera</button>
+    </div>
+</div>
+
+<div class="card">
+    <h2>&#9999;&#65039; Manual Entry</h2>
+    <div class="manual-row">
+        <input type="text" id="manualInput" placeholder="Type or paste a barcode value&hellip;" />
+        <button onclick="addManual()">Add</button>
+    </div>
+</div>
+
+<div class="card">
+    <h2>&#128203; Scanned Records <span class="badge" id="countBadge">0</span></h2>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>#</th><th>Barcode Value</th><th>Format</th><th>Timestamp</th><th></th></tr></thead>
+            <tbody id="tableBody">
+                <tr><td colspan="5" class="empty-msg">No barcodes scanned yet.</td></tr>
+            </tbody>
+        </table>
+    </div>
+    <div class="btn-row" style="margin-top:16px;">
+        <button id="clearBtn"    onclick="clearAll()">&#128465; Clear All</button>
+        <button id="downloadBtn" onclick="downloadCSV()">&#11015; Download CSV</button>
+    </div>
+</div>
+
+<script>
+    // ── State ────────────────────────────────────────────────────────────────
+    var records    = [];
+    var scanning   = false;
+    var bannerTimer = null;
+
+    // Duplicate prevention: track last code + last commit time
+    var lastCode   = '';
+    var lastCodeAt = 0;
+    var lastCommit = 0;
+    var CODE_COOL  = 4000;   // ignore same code for 4s after logging
+    var GLOBAL_COOL = 1500;  // freeze everything for 1.5s after any commit
+
+    // ── Persist ───────────────────────────────────────────────────────────────
+    function loadData() {
+        try {
+            window.db.get('barcode_records').then(function(d) {
+                if (d && d.records) { records = d.records; renderTable(); }
+            }).catch(function(){});
+        } catch(e) {}
+    }
+    function saveData() {
+        try { window.db.set('barcode_records', { records: records }); } catch(e) {}
+    }
+
+    // ── Start ─────────────────────────────────────────────────────────────────
+    function startScanner() {
+        setStatus('loading', 'Starting camera...');
+        document.getElementById('startBtn').style.display = 'none';
+        document.getElementById('stopBtn').style.display  = '';
+
+        Quagga.init({
+            inputStream: {
+                name: 'Live',
+                type: 'LiveStream',
+                target: document.getElementById('scanner-container'),
+                constraints: { facingMode: 'environment', width: { ideal:1280 }, height: { ideal:720 } }
+            },
+            decoder: {
+                // Reader list is critical for correct values:
+                //
+                // EXCLUDED — ean_8_reader:
+                //   Decodes 8 digits from the MIDDLE of an EAN-13 barcode.
+                //   Same physical label → wrong short number every time.
+                //
+                // EXCLUDED — upc_reader / upc_e_reader:
+                //   UPC-A strips the leading 0 from EAN-13.
+                //   The number on the product has 13 digits; upc_reader
+                //   returns only 12. ean_reader handles UPC-A correctly.
+                //
+                // EXCLUDED — i2of5_reader:
+                //   No checksum validation. Reads phantom codes from the
+                //   bar patterns inside other barcode types.
+                readers: [
+                    'ean_reader',       // EAN-13 + UPC-A → full 13-digit printed value
+                    'code_128_reader',  // retail, warehouse, shipping
+                    'code_39_reader',   // industrial, automotive
+                    'codabar_reader'    // libraries, blood banks
+                ]
+            },
+            locate:       true,
+            numOfWorkers: 2,
+            frequency:    15
+        }, function(err) {
+            if (err) {
+                setStatus('error', 'Camera error: ' + err.message);
+                console.error('Quagga init failed:', err);
+                document.getElementById('startBtn').style.display = '';
+                document.getElementById('stopBtn').style.display  = 'none';
+                return;
+            }
+            Quagga.start();
+            scanning = true;
+            setStatus('active', 'Scanning... point camera at barcode');
+            Quagga.onDetected(onDetected);
+        });
+    }
+
+    // ── Detection ─────────────────────────────────────────────────────────────
+    // Direct live-stream commit — no snapshot, no vote system.
+    // Two simple cooldowns prevent duplicates without blocking legitimate reads.
+    function onDetected(result) {
+        var now    = Date.now();
+        var code   = result.codeResult.code;
+        var format = result.codeResult.format;
+
+        if (!code || code.length < 3) return;
+
+        // Global cooldown — brief freeze after any commit
+        if (now - lastCommit < GLOBAL_COOL) return;
+
+        // Per-code cooldown — same value too soon
+        if (code === lastCode && (now - lastCodeAt) < CODE_COOL) return;
+
+        // Normalise: ean_reader occasionally returns 12 digits for a UPC-A
+        // barcode. The number printed on the product is always 13 — pad it.
+        if (format === 'ean_13' && code.length === 12) code = '0' + code;
+
+        lastCode   = code;
+        lastCodeAt = now;
+        lastCommit = now;
+
+        commitScan(code, format);
+    }
+
+    // ── Commit ────────────────────────────────────────────────────────────────
+    function commitScan(code, format) {
+        // Green flash on viewport
+        var fl = document.getElementById('scan-flash');
+        fl.classList.remove('pop');
+        void fl.offsetWidth;
+        fl.classList.add('pop');
+
+        // Green pulse on card border
+        var card = document.getElementById('cameraCard');
+        card.classList.remove('flash');
+        void card.offsetWidth;
+        card.classList.add('flash');
+
+        // Confirmation banner
+        document.getElementById('confirm-text').textContent = code + '  (' + format + ')';
+        var banner = document.getElementById('confirm-banner');
+        banner.classList.remove('show');
+        void banner.offsetWidth;
+        banner.classList.add('show');
+        clearTimeout(bannerTimer);
+        bannerTimer = setTimeout(function() {
+            document.getElementById('confirm-banner').classList.remove('show');
+        }, 3000);
+
+        setHint('');
+        addRecord(code, format);
+    }
+
+    // ── Stop ──────────────────────────────────────────────────────────────────
+    function stopScanner() {
+        if (scanning) {
+            Quagga.offDetected(onDetected);
+            Quagga.stop();
+            scanning = false;
+        }
+        lastCode = ''; lastCodeAt = 0; lastCommit = 0;
+        document.getElementById('startBtn').style.display = '';
+        document.getElementById('stopBtn').style.display  = 'none';
+        document.getElementById('confirm-banner').classList.remove('show');
+        setStatus('idle', 'Camera stopped');
+        setHint('');
+    }
+
+    // ── UI helpers ────────────────────────────────────────────────────────────
+    function setStatus(type, msg) {
+        var dot = document.getElementById('statusDot');
+        dot.className = 'dot';
+        if (type === 'active') dot.classList.add('active');
+        if (type === 'error')  dot.classList.add('error');
+        document.getElementById('statusText').textContent = msg;
+    }
+    function setHint(msg) { document.getElementById('hint').textContent = msg; }
+
+    // ── Records ───────────────────────────────────────────────────────────────
+    function addRecord(value, format) {
+        var ts = new Date().toISOString().replace('T',' ').substring(0,19);
+        records.push({ value:value, format:format||'manual', ts:ts });
+        renderTable();
+        saveData();
+    }
+    function addManual() {
+        var input = document.getElementById('manualInput');
+        var val = input.value.trim();
+        if (!val) return;
+        addRecord(val, 'manual');
+        input.value = '';
+    }
+    document.getElementById('manualInput').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') addManual();
+    });
+    function deleteRecord(idx) { records.splice(idx,1); renderTable(); saveData(); }
+    function clearAll() {
+        if (!records.length) return;
+        records = []; renderTable(); saveData();
+    }
+
+    // ── Render ────────────────────────────────────────────────────────────────
+    function renderTable() {
+        var tbody = document.getElementById('tableBody');
+        document.getElementById('countBadge').textContent = records.length;
+        if (!records.length) {
+            tbody.innerHTML = '<tr><td colspan="5" class="empty-msg">No barcodes scanned yet.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = records.map(function(r,i) {
+            return '<tr><td>'+(i+1)+'</td><td><strong>'+esc(r.value)+'</strong></td><td>'+esc(r.format)+'</td><td>'+esc(r.ts)+'</td><td><button class="del-btn" onclick="deleteRecord('+i+')">&#10005;</button></td></tr>';
+        }).join('');
+    }
+    function esc(s) {
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // ── CSV ───────────────────────────────────────────────────────────────────
+    function downloadCSV() {
+        if (!records.length) { setStatus('error','Nothing to export!'); setTimeout(function(){setStatus('idle','');},2000); return; }
+        var header = ['#','Barcode Value','Format','Timestamp'];
+        var rows = records.map(function(r,i){ return [i+1,'"'+r.value.replace(/"/g,'""')+'"','"'+r.format+'"','"'+r.ts+'"']; });
+        var csv = [header.join(',')].concat(rows.map(function(r){return r.join(',');})).join('\r\n');
+        var blob = new Blob([csv],{type:'text/csv;charset=utf-8;'});
+        var name = 'barcodes_'+new Date().toISOString().slice(0,10)+'.csv';
+        if (window.fs && window.fs.downloadFile) { window.fs.downloadFile(blob,name); }
+        else { var url=URL.createObjectURL(blob); var a=document.createElement('a'); a.href=url; a.download=name; a.click(); URL.revokeObjectURL(url); }
+    }
+
+    // ── Init ──────────────────────────────────────────────────────────────────
+    loadData();
+</script>
+</body>
+</html>
