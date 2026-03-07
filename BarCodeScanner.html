@@ -614,8 +614,6 @@
     // We intersect our wanted formats with what the device actually supports
     // so we never pass an unsupported format (which silently causes no detections).
     // Desktop: always ZXing (canvas tap-decode path, confirmed working).
-    var WANTED_FORMATS = ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf'];
-
     function startScanner() {
         setStatus('loading', 'Starting camera...');
         document.getElementById('startBtn').style.display = 'none';
@@ -623,18 +621,18 @@
 
         if (!useNative) { startZXing(); return; }
 
-        // Get the real supported list, intersect with wanted, then start.
-        // If getSupportedFormats fails, just pass all wanted and let the
-        // detector silently skip any unsupported ones.
+        // Pass ALL formats the device supports to BarcodeDetector.
+        // Hardcoding a subset risks silently dropping formats that the device
+        // names differently (e.g. some firmware reports code_128 variants
+        // under different keys). Letting the device use its full list means
+        // every barcode type it can physically decode will fire.
         BarcodeDetector.getSupportedFormats().then(function(supported) {
-            var active = WANTED_FORMATS.filter(function(f) {
-                return supported.indexOf(f) !== -1;
-            });
-            console.log('BarcodeDetector active formats:', active);
-            // Always use native on mobile — never fall back to ZXing
-            startNative(active.length ? active : WANTED_FORMATS);
+            console.log('BarcodeDetector all supported formats:', supported);
+            startNative(supported);
         }).catch(function() {
-            startNative(WANTED_FORMATS);
+            // getSupportedFormats unavailable — pass no formats list, which
+            // causes BarcodeDetector to use its default (all supported)
+            startNative(null);
         });
     }
 
@@ -642,9 +640,10 @@
     // MOBILE — Native BarcodeDetector (Android Chrome 83+)
     // ══════════════════════════════════════════════════════════════════════════
     function startNative(formats) {
-        nativeDetector = new BarcodeDetector({
-            formats: formats || WANTED_FORMATS
-        });
+        // If formats is null or empty, omit the formats option entirely —
+        // BarcodeDetector then defaults to detecting everything it supports
+        var opts = (formats && formats.length) ? { formats: formats } : {};
+        nativeDetector = new BarcodeDetector(opts);
         navigator.mediaDevices.getUserMedia({
             audio: false,
             video: { facingMode: { ideal: 'environment' }, width: { ideal:1280 }, height: { ideal:720 } }
