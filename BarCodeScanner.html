@@ -614,8 +614,6 @@
                 dbg('BD FOUND: ' + bc.rawValue + ' (' + bc.format + ')');
                 lastCode = bc.rawValue; lastTime = now;
                 commitScan(bc.rawValue, bc.format);
-                // Immediately return to idle — wait for next tap
-                setStatus('active', 'Point camera at barcode, then tap to scan');
             }).catch(function(){}).finally(function() {
                 // Only reschedule if this tap session is still active
                 if (scanning && tapPending && mySession === tapSession) {
@@ -665,8 +663,6 @@
             dbg('ZXing FOUND: ' + code + ' (' + fmtName + ')');
             lastCode = code; lastTime = now;
             commitScan(code, fmtName);
-            // Immediately return to idle — wait for next tap
-            setStatus('active', 'Point camera at barcode, then tap to scan');
         }).then(function() {
             scanning = true;
             document.getElementById('tap-hint').style.display = 'block';
@@ -895,6 +891,8 @@
         }
 
         setHint('');
+        // Reset status to idle — dot goes grey, message clearly says "tap to scan"
+        setStatus('idle', 'Tap the viewfinder to scan');
     }
 
     // ── UI ────────────────────────────────────────────────────────────────────
