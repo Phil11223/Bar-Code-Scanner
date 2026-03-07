@@ -438,6 +438,13 @@
     </div>
 </div>
 
+<!-- ── Debug panel (remove once scanning works) ──────────────────────────── -->
+<div id="debug-panel" style="width:100%;max-width:600px;background:#0d0d1a;border:1px solid #4cc9f0;
+     border-radius:10px;padding:12px;margin-bottom:16px;font-family:monospace;font-size:0.75rem;color:#0f0;">
+    <div style="color:#4cc9f0;margin-bottom:6px;font-weight:bold;">🔍 Debug Panel</div>
+    <div id="dbg-info">Loading...</div>
+</div>
+
 <script>
     // ── State ─────────────────────────────────────────────────────────────────
     var records     = [];
@@ -459,6 +466,22 @@
     // ── Rename popup state ────────────────────────────────────────────────────
     var renameCol    = null;   // which col key is being renamed: 'value' or 'item'
     var renameInputEl = null;
+
+    // ── Tap-to-scan gate ──────────────────────────────────────────────────────
+    // Scan loops run continuously but only decode when tapPending = true.
+    // Set true on tap, false when a barcode is committed.
+    var tapPending = false;
+
+    // ── On-screen debug helper ────────────────────────────────────────────────
+    // Logs to a visible panel on the page — works without DevTools on mobile.
+    var dbgLines = [];
+    function dbg(msg) {
+        var ts = new Date().toISOString().slice(11,19);
+        dbgLines.unshift('[' + ts + '] ' + msg);
+        if (dbgLines.length > 18) dbgLines.length = 18;
+        var el = document.getElementById('dbg-info');
+        if (el) el.innerHTML = dbgLines.join('<br>');
+    }
 
     // ── Device detection ─────────────────────────────────────────────────────
     var isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
@@ -494,6 +517,8 @@
             }
         }).then(function(stream) {
             scanStream = stream;
+            var t = stream.getVideoTracks()[0];
+            dbg('Camera open: ' + (t ? t.label : 'no track'));
 
             // ── Autofocus: must use applyConstraints AFTER stream opens ────────
             // focusMode is NOT valid in getUserMedia constraints — putting it there
@@ -509,6 +534,7 @@
             return video.play();
 
         }).then(function() {
+            dbg('video.play() resolved — video is live');
             // ── Torch button ───────────────────────────────────────────────────
             // Show on mobile immediately; hide only if applyConstraints rejects.
             // We do NOT probe getCapabilities().torch — it returns {} on many real
@@ -530,6 +556,7 @@
             var zxFb   = new ZXing.BrowserMultiFormatReader(zxHintsFallback);
 
             scanning = true;
+            dbg('scanning=true, isMobile=' + isMobile + ', BD=' + (typeof BarcodeDetector !== "undefined"));
             setStatus('active', 'Tap viewport to scan');
             document.getElementById('tap-hint').style.display = 'block';
             updateScanLabel();
@@ -538,27 +565,39 @@
             // Runs every 300ms but only processes a frame when tapPending=true.
             // Slower than rAF but ZXing is synchronous and CPU-heavy — 300ms
             // is plenty to catch a barcode without saturating the JS thread.
+            var zxTickCount = 0;
             scanTimer = setInterval(function() {
                 if (!tapPending || !scanning) return;
                 var vid = document.getElementById('camVideo');
-                if (!vid || vid.videoWidth === 0 || vid.readyState < 2) return;
+                if (!vid || vid.videoWidth === 0 || vid.readyState < 2) {
+                    dbg('tick: video not ready rs=' + (vid ? vid.readyState : '?') + ' w=' + (vid ? vid.videoWidth : '?'));
+                    return;
+                }
+
+                zxTickCount++;
+                dbg('ZXing tick #' + zxTickCount + ' ' + vid.videoWidth + 'x' + vid.videoHeight);
 
                 scanCanvas.width  = vid.videoWidth;
                 scanCanvas.height = vid.videoHeight;
                 scanCanvas.getContext('2d').drawImage(vid, 0, 0);
 
+                var zxErr1 = null, zxErr2 = null;
                 var result = null;
-                try { result = zxPref.decodeFromCanvas(scanCanvas); } catch(e) {}
+                try { result = zxPref.decodeFromCanvas(scanCanvas); } catch(e) { zxErr1 = e.message || String(e); }
                 if (!result) {
-                    try { result = zxFb.decodeFromCanvas(scanCanvas); } catch(e) {}
+                    try { result = zxFb.decodeFromCanvas(scanCanvas); } catch(e) { zxErr2 = e.message || String(e); }
                 }
-                if (!result) return;
+                if (!result) {
+                    dbg('ZXing no result: ' + (zxErr1||'') + ' | ' + (zxErr2||''));
+                    return;
+                }
 
                 var code    = result.getText();
                 var fmt     = result.getBarcodeFormat();
                 var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
                 if (code && code.length >= 3 &&
                     !(code === lastCode && (Date.now() - lastTime) < COOLDOWN)) {
+                    dbg('ZXing FOUND: ' + code + ' (' + fmtName + ')');
                     tapPending = false;
                     lastCode = code; lastTime = Date.now();
                     commitScan(code, fmtName);
@@ -594,6 +633,7 @@
             }
 
         }).catch(function(err) {
+            dbg('ERROR: ' + err.name + ': ' + err.message);
             setStatus('error', 'Camera error: ' + err.message);
             console.error('Camera error:', err);
             document.getElementById('startBtn').style.display = '';
@@ -848,6 +888,7 @@
             // Reset cooldown — user is explicitly asking to re-scan
             lastCode = ''; lastTime = 0;
             tapPending = true;
+            dbg('TAP — tapPending=true, scanning=' + scanning);
         }
         container.addEventListener('click',    onTap);
         container.addEventListener('touchend', onTap, { passive: true });
