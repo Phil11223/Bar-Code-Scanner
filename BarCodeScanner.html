@@ -673,24 +673,65 @@
                         // Engine 1: BarcodeDetector rAF loop (native, fast for QR/EAN)
                         nativeScanFrame();
 
-                        // Engine 2: ZXing decodeFromVideoDevice (software, handles
-                        // Code128 variants the device chipset may not support natively)
+                        // Engine 2: ZXing rAF canvas loop (software decoder).
+                        // Tries all 4 rotations per frame so it works regardless of
+                        // phone orientation and handles ITF, Code128 variants, etc.
+                        // Uses synchronous decodeFromCanvas — no internal throttling.
                         zxMobileReader = new ZXing.BrowserMultiFormatReader();
-                        zxMobileReader.decodeFromVideoDevice(null, 'camVideo',
-                            function(result, err) {
-                                if (!result || !tapPending) return;
-                                var code = result.getText();
-                                var fmt  = result.getBarcodeFormat();
-                                var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
-                                if (!code || code.length < 3) return;
-                                if (code === lastCode && (Date.now() - lastTime) < COOLDOWN) return;
-                                tapPending = false;
-                                lastCode = code; lastTime = Date.now();
-                                commitScan(code, fmtName);
+                        var zxMobileCanvas = document.createElement('canvas');
+                        zxMobileCanvas.style.display = 'none';
+                        document.body.appendChild(zxMobileCanvas);
+
+                        function zxMobileScanFrame() {
+                            if (!scanning) {
+                                zxMobileCanvas.remove();
+                                return;
                             }
-                        ).catch(function(e) {
-                            console.log('ZXing mobile fallback error:', e);
-                        });
+                            if (!tapPending) {
+                                // Not armed — check again next frame
+                                requestAnimationFrame(zxMobileScanFrame);
+                                return;
+                            }
+
+                            var vid = document.getElementById('camVideo');
+                            if (!vid || vid.videoWidth === 0 || vid.readyState < 2) {
+                                requestAnimationFrame(zxMobileScanFrame);
+                                return;
+                            }
+
+                            var w = vid.videoWidth, h = vid.videoHeight;
+                            var ctx = zxMobileCanvas.getContext('2d');
+                            // Try all 4 rotations — phone may be held at any angle
+                            var rotations = [0, 90, 180, 270];
+                            var found = false;
+                            for (var ri = 0; ri < rotations.length && !found; ri++) {
+                                var deg = rotations[ri];
+                                var rotated = (deg === 90 || deg === 270);
+                                zxMobileCanvas.width  = rotated ? h : w;
+                                zxMobileCanvas.height = rotated ? w : h;
+                                ctx.save();
+                                ctx.translate(zxMobileCanvas.width/2, zxMobileCanvas.height/2);
+                                ctx.rotate(deg * Math.PI / 180);
+                                ctx.drawImage(vid, -w/2, -h/2, w, h);
+                                ctx.restore();
+                                try {
+                                    var result = zxMobileReader.decodeFromCanvas(zxMobileCanvas);
+                                    var code = result.getText();
+                                    var fmt  = result.getBarcodeFormat();
+                                    var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
+                                    if (code && code.length >= 3 &&
+                                        !(code === lastCode && (Date.now() - lastTime) < COOLDOWN)) {
+                                        found = true;
+                                        tapPending = false;
+                                        lastCode = code; lastTime = Date.now();
+                                        commitScan(code, fmtName);
+                                    }
+                                } catch(e) { /* NotFoundException for this rotation — try next */ }
+                            }
+
+                            if (!found) requestAnimationFrame(zxMobileScanFrame);
+                        }
+                        zxMobileScanFrame();
                     });
                 } else {
                     requestAnimationFrame(waitForFrame);
@@ -730,6 +771,7 @@
         if (nativeLoop)      { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
         if (zxMobileReader)  { zxMobileReader.reset(); zxMobileReader = null; }
         if (nativeStream)    { nativeStream.getTracks().forEach(function(t){t.stop();}); nativeStream = null; }
+        // zxMobileCanvas removes itself inside zxMobileScanFrame when scanning=false
         document.getElementById('camVideo').srcObject = null;
     }
 
