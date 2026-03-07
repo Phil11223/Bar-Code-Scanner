@@ -450,6 +450,33 @@
     var nativeLoop     = null;
     var zxReader       = null;
 
+    // ── ZXing decode hints — shared by all reader instances ───────────────────
+    // TRY_HARDER: essential for ITF (Interleaved 2 of 5) — tells ZXing to
+    //             spend extra effort scanning each frame. Without it, ITF
+    //             barcodes with uniform narrow bars are often missed entirely.
+    // POSSIBLE_FORMATS: explicitly list every format we want. BrowserMultiFormatReader
+    //             may skip ITF without this even when TRY_HARDER is set.
+    var zxHints = (function() {
+        var hints = new Map();
+        hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+        hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+            ZXing.BarcodeFormat.ITF,
+            ZXing.BarcodeFormat.CODE_128,
+            ZXing.BarcodeFormat.CODE_39,
+            ZXing.BarcodeFormat.CODE_93,
+            ZXing.BarcodeFormat.CODABAR,
+            ZXing.BarcodeFormat.EAN_13,
+            ZXing.BarcodeFormat.EAN_8,
+            ZXing.BarcodeFormat.UPC_A,
+            ZXing.BarcodeFormat.UPC_E,
+            ZXing.BarcodeFormat.QR_CODE,
+            ZXing.BarcodeFormat.DATA_MATRIX,
+            ZXing.BarcodeFormat.PDF_417,
+            ZXing.BarcodeFormat.AZTEC
+        ]);
+        return hints;
+    })();
+
     // ── Tap-to-scan gate ──────────────────────────────────────────────────────
     // Scan loops run continuously but only commit when tapPending = true.
     var tapPending = false;
@@ -473,9 +500,10 @@
             void ripple.offsetWidth;
             ripple.classList.add('burst');
 
-            // Do NOT reset lastCode here — cooldown must stay active to prevent
-            // the same barcode re-firing immediately when user taps for item scan.
-            // lastCode only resets on stopScanner() or when COOLDOWN ms elapse.
+            // Reset cooldown on every explicit tap — user is deliberately asking
+            // to scan. The multi-scan double-commit risk no longer exists because
+            // tapPending is never auto-armed after the first scan.
+            lastCode = ''; lastTime = 0;
             if (useNative) {
                 tapPending = true;
             } else {
@@ -684,12 +712,14 @@
                             // Tear down any previous instance first
                             if (zxMobileReader) { zxMobileReader.reset(); zxMobileReader = null; }
 
-                            zxMobileReader = new ZXing.BrowserMultiFormatReader();
-                            zxMobileReader.decodeFromVideoDevice(null, 'camVideo',
+                            zxMobileReader = new ZXing.BrowserMultiFormatReader(zxHints);
+                            // Use decodeFromStream with the EXISTING nativeStream
+                            // (rear camera already open). decodeFromVideoDevice(null)
+                            // would open a NEW stream and pick the default/front camera.
+                            zxMobileReader.decodeFromStream(nativeStream, 'camVideo',
                                 function(result, err) {
                                     if (!result) return;
                                     if (!tapPending) {
-                                        // Tap was consumed by BarcodeDetector — stop this reader
                                         if (zxMobileReader) { zxMobileReader.reset(); zxMobileReader = null; }
                                         return;
                                     }
@@ -800,7 +830,7 @@
     var zxScanLoop  = null;   // rAF handle, desktop canvas path
 
     function startZXing() {
-        zxReader = new ZXing.BrowserMultiFormatReader();
+        zxReader = new ZXing.BrowserMultiFormatReader(zxHints);
 
         if (isMobile) {
             // ── Mobile ZXing path ─────────────────────────────────────────────
