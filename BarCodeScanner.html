@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Barcode Scanner</title>
-    <!-- ZXing used on desktop only. Mobile uses native BarcodeDetector API. -->
     <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -14,15 +13,85 @@
             min-height: 100vh; display: flex;
             flex-direction: column; align-items: center; padding: 16px;
         }
+
+        /* ── Header ──────────────────────────────────────────────────────────── */
         header {
             width: 100%; max-width: 600px;
             display: flex; align-items: center; gap: 12px;
             margin-bottom: 20px; padding: 12px 16px;
             background: #16213e; border-radius: 12px;
             border-left: 4px solid #4cc9f0;
+            position: relative;
         }
-        header h1 { font-size: 1.2rem; color: #4cc9f0; }
+        header h1 { font-size: 1.2rem; color: #4cc9f0; flex: 1; }
 
+        /* ── Floating menu (top-left of header) ───────────────────────────────
+           The hamburger button sits inside the header flex row.
+           The dropdown panel is absolute-positioned relative to the header.   */
+        #menu-wrap { position: relative; flex-shrink: 0; }
+
+        #menu-btn {
+            width: 36px; height: 36px;
+            background: #0f3460; border: 1px solid #4cc9f0;
+            border-radius: 8px; cursor: pointer;
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 4px;
+            flex-shrink: 0; transition: background 0.2s;
+        }
+        #menu-btn:hover { background: #1a4d6e; }
+        #menu-btn span {
+            display: block; width: 16px; height: 2px;
+            background: #4cc9f0; border-radius: 2px;
+            transition: all 0.2s;
+        }
+
+        #menu-dropdown {
+            position: absolute;
+            top: calc(100% + 8px); left: 0;
+            background: #16213e; border: 1px solid #2a4a6e;
+            border-radius: 10px; min-width: 190px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+            z-index: 100;
+            /* Fade in/out */
+            opacity: 0; pointer-events: none;
+            transform: translateY(-6px);
+            transition: opacity 0.2s ease, transform 0.2s ease;
+        }
+        #menu-dropdown.open {
+            opacity: 1; pointer-events: auto; transform: translateY(0);
+        }
+        .menu-item {
+            display: flex; align-items: center; gap: 10px;
+            padding: 11px 14px; cursor: pointer;
+            font-size: 0.88rem; color: #ccc;
+            transition: background 0.15s;
+            border-radius: 10px;
+        }
+        .menu-item:hover { background: #0f3460; color: #eee; }
+
+        /* Toggle switch inside menu */
+        .toggle-switch {
+            position: relative; width: 36px; height: 20px;
+            flex-shrink: 0; margin-left: auto;
+        }
+        .toggle-switch input { display: none; }
+        .toggle-track {
+            position: absolute; inset: 0;
+            background: #333; border-radius: 20px;
+            transition: background 0.2s; cursor: pointer;
+        }
+        .toggle-track::after {
+            content: ''; position: absolute;
+            width: 14px; height: 14px; border-radius: 50%;
+            background: #888; top: 3px; left: 3px;
+            transition: all 0.2s;
+        }
+        .toggle-switch input:checked + .toggle-track { background: #4cc9f0; }
+        .toggle-switch input:checked + .toggle-track::after {
+            background: #1a1a2e; left: 19px;
+        }
+
+        /* ── Cards ───────────────────────────────────────────────────────────── */
         .card {
             width: 100%; max-width: 600px; background: #16213e;
             border-radius: 16px; padding: 20px; margin-bottom: 16px;
@@ -33,69 +102,53 @@
             letter-spacing: 1px; color: #4cc9f0; margin-bottom: 14px;
         }
 
+        /* ── Rescan prompt (above scanner, hidden by default) ────────────────── */
+        #rescan-prompt {
+            width: 100%; max-width: 600px;
+            background: #0f3460; border: 1px solid #4cc9f0;
+            border-radius: 10px; padding: 10px 16px;
+            font-size: 0.85rem; color: #4cc9f0; font-weight: 600;
+            text-align: center; margin-bottom: 10px;
+            display: none;
+            animation: fadeSlideIn 0.25s ease;
+        }
+        @keyframes fadeSlideIn {
+            from { opacity: 0; transform: translateY(-4px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
+        /* ── Scanner container ───────────────────────────────────────────────── */
         #scanner-container {
-            position: relative;
-            width: 100%;
-            aspect-ratio: 4 / 3;
-            background: #000;
-            border-radius: 12px;
-            overflow: hidden;
-            cursor: crosshair;  /* signals the viewport is tappable */
-        }
-
-        /* Tap ripple — brief white pulse from tap point to confirm the gesture */
-        #tap-ripple {
-            position: absolute;
-            width: 60px; height: 60px;
-            border-radius: 50%;
-            background: rgba(255,255,255,0.3);
-            transform: translate(-50%, -50%) scale(0);
-            pointer-events: none;
-            z-index: 20;
-        }
-        #tap-ripple.burst {
-            animation: rippleBurst 0.4s ease-out forwards;
-        }
-        @keyframes rippleBurst {
-            0%   { transform: translate(-50%, -50%) scale(0); opacity: 1; }
-            100% { transform: translate(-50%, -50%) scale(3); opacity: 0; }
-        }
-
-        /* "TAP TO SCAN" label inside the viewport */
-        #tap-hint {
-            position: absolute;
-            bottom: 10px; left: 50%;
-            transform: translateX(-50%);
-            background: rgba(0,0,0,0.55);
-            color: #4cc9f0;
-            font-size: 0.75rem; font-weight: 700;
-            letter-spacing: 1px;
-            padding: 4px 14px;
-            border-radius: 20px;
-            pointer-events: none;
-            z-index: 15;
-            display: none;  /* shown only when camera is active */
+            position: relative; width: 100%;
+            aspect-ratio: 4 / 3; background: #000;
+            border-radius: 12px; overflow: hidden;
+            cursor: crosshair;
         }
         #camVideo {
-            position: absolute;
-            top: 0; left: 0;
+            position: absolute; top: 0; left: 0;
             width: 100%; height: 100%;
-            object-fit: cover;
-            display: block;
+            object-fit: cover; display: block;
         }
         .scan-overlay {
-            position: absolute;
-            top: 50%; left: 50%;
+            position: absolute; top: 50%; left: 50%;
             transform: translate(-50%, -50%);
             width: 85%; height: 35%;
             border: 2px solid #4cc9f0; border-radius: 6px;
             box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);
             z-index: 10; pointer-events: none;
         }
+        /* Overlay turns amber when in rescan mode */
+        #scanner-container.rescan-mode .scan-overlay {
+            border-color: #f4a261;
+            box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);
+        }
         .scan-line {
             position: absolute; width: 100%; height: 2px;
             background: linear-gradient(90deg, transparent, #4cc9f0, transparent);
             animation: scanLine 1.5s ease-in-out infinite; top: 0;
+        }
+        #scanner-container.rescan-mode .scan-line {
+            background: linear-gradient(90deg, transparent, #f4a261, transparent);
         }
         @keyframes scanLine { 0%{top:0} 100%{top:100%} }
 
@@ -106,6 +159,47 @@
         }
         #scan-flash.pop { animation: flashPop 0.5s ease forwards; }
         @keyframes flashPop { 0%{opacity:1} 100%{opacity:0} }
+
+        #tap-ripple {
+            position: absolute; width: 60px; height: 60px;
+            border-radius: 50%; background: rgba(255,255,255,0.3);
+            transform: translate(-50%, -50%) scale(0);
+            pointer-events: none; z-index: 20;
+        }
+        #tap-ripple.burst { animation: rippleBurst 0.4s ease-out forwards; }
+        @keyframes rippleBurst {
+            0%   { transform: translate(-50%, -50%) scale(0); opacity: 1; }
+            100% { transform: translate(-50%, -50%) scale(3); opacity: 0; }
+        }
+
+        #tap-hint {
+            position: absolute; bottom: 10px; left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.55); color: #4cc9f0;
+            font-size: 0.75rem; font-weight: 700; letter-spacing: 1px;
+            padding: 4px 14px; border-radius: 20px;
+            pointer-events: none; z-index: 15; display: none;
+        }
+        #scanner-container.rescan-mode #tap-hint { color: #f4a261; }
+
+        /* ── Scan label (top-left overlay on video) ───────────────────────────
+           Shows "Scan [column header]" so the user always knows what they're
+           currently scanning. Colour matches the overlay border — blue for
+           primary, amber when in rescan/item mode.                           */
+        #scan-label {
+            position: absolute;
+            top: 10px; left: 10px;
+            background: rgba(0,0,0,0.6);
+            color: #4cc9f0;
+            font-size: 0.72rem; font-weight: 700; letter-spacing: 0.5px;
+            padding: 4px 10px;
+            border-radius: 20px;
+            pointer-events: none;
+            z-index: 15;
+            display: none;                    /* shown only when camera active */
+            transition: color 0.2s ease;
+        }
+        #scanner-container.rescan-mode #scan-label { color: #f4a261; }
 
         .flash { animation: cardFlash 0.7s ease forwards; }
         @keyframes cardFlash {
@@ -153,25 +247,124 @@
         .manual-row input:focus { border-color:#4cc9f0; }
         .manual-row button { flex:0 0 auto; padding:10px 18px; background:#4cc9f0; color:#1a1a2e; }
 
+        /* ── Table ───────────────────────────────────────────────────────────── */
         .table-wrap { overflow-x:auto; border-radius:8px; }
         table { width:100%; border-collapse:collapse; font-size:0.85rem; }
-        thead th { background:#0f3460; color:#4cc9f0; padding:10px 12px; text-align:left; font-weight:600; }
+        thead th {
+            background:#0f3460; color:#4cc9f0;
+            padding:10px 12px; text-align:left; font-weight:600;
+        }
+        /* Editable headers show a subtle pencil hint on hover */
+        thead th.editable {
+            cursor: pointer; user-select: none;
+        }
+        thead th.editable:hover { color: #7de3f7; }
+        thead th.editable::after {
+            content: ' ✎';
+            font-size: 0.7rem; opacity: 0.5;
+        }
         tbody tr:nth-child(even) { background:rgba(255,255,255,0.03); }
         tbody tr:hover { background:rgba(76,201,240,0.08); }
         tbody td { padding:9px 12px; border-bottom:1px solid rgba(255,255,255,0.05); word-break:break-all; }
+
+        /* Rescannable cells in multi-scan mode */
+        td.rescannable {
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        td.rescannable:hover { background: rgba(76,201,240,0.15) !important; }
+        td.rescannable strong { text-decoration: underline dotted rgba(76,201,240,0.4); }
+
+        /* Highlight the currently selected rescan cell */
+        td.rescan-selected {
+            background: rgba(244,162,97,0.15) !important;
+            outline: 1px solid rgba(244,162,97,0.5);
+        }
+        td.rescan-selected strong { color: #f4a261; }
+
         .del-btn { background:transparent; border:1px solid #e63946; color:#e63946; padding:4px 10px; font-size:0.75rem; border-radius:6px; cursor:pointer; }
         .del-btn:hover { background:#e63946; color:#fff; }
         .empty-msg { text-align:center; color:#666; padding:24px; font-size:0.9rem; }
         .badge { display:inline-block; background:#4cc9f0; color:#1a1a2e; border-radius:20px; padding:2px 10px; font-size:0.75rem; font-weight:700; margin-left:8px; }
+
+        /* ── Rename popup overlay ─────────────────────────────────────────────
+           Sits over everything, fades in when shown, fades out when dismissed.
+           Styled to match the existing manual-entry card feel.               */
+        #rename-overlay {
+            position: fixed; inset: 0;
+            background: rgba(0,0,0,0.6);
+            z-index: 200;
+            display: flex; align-items: center; justify-content: center;
+            opacity: 0; pointer-events: none;
+            transition: opacity 0.25s ease;
+        }
+        #rename-overlay.show {
+            opacity: 1; pointer-events: auto;
+        }
+        #rename-box {
+            background: #16213e; border-radius: 16px;
+            padding: 24px 20px; width: 90%; max-width: 380px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+            transform: translateY(10px);
+            transition: transform 0.25s ease;
+        }
+        #rename-overlay.show #rename-box { transform: translateY(0); }
+        #rename-box h3 {
+            font-size: 0.9rem; text-transform: uppercase;
+            letter-spacing: 1px; color: #4cc9f0; margin-bottom: 14px;
+        }
+        #rename-box input {
+            width: 100%; padding: 10px 14px;
+            border-radius: 8px; border: 1px solid #333;
+            background: #0f3460; color: #eee;
+            font-size: 0.95rem; outline: none; margin-bottom: 14px;
+        }
+        #rename-box input:focus { border-color: #4cc9f0; }
+        .rename-btns { display: flex; gap: 10px; }
+        .rename-btns button { flex: 1; padding: 10px; border-radius: 8px; border: none; font-size: 0.9rem; font-weight: 600; cursor: pointer; }
+        #rename-save   { background: #4cc9f0; color: #1a1a2e; }
+        #rename-cancel { background: #444; color: #eee; }
     </style>
 </head>
 <body>
 
+<!-- ── Rename popup overlay ──────────────────────────────────────────────── -->
+<div id="rename-overlay">
+    <div id="rename-box">
+        <h3 id="rename-title">Rename Column</h3>
+        <input type="text" id="rename-input" placeholder="Enter column name..." />
+        <div class="rename-btns">
+            <button id="rename-save"   onclick="saveRename()">Save</button>
+            <button id="rename-cancel" onclick="closeRename()">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<!-- ── Header ────────────────────────────────────────────────────────────── -->
 <header>
+    <!-- Hamburger menu — floating top-left inside header -->
+    <div id="menu-wrap">
+        <div id="menu-btn" onclick="toggleMenu()" title="Options">
+            <span></span><span></span><span></span>
+        </div>
+        <div id="menu-dropdown">
+            <label class="menu-item" onclick="toggleMultiScan()">
+                <span>&#9635; Multi-Scan</span>
+                <div class="toggle-switch">
+                    <input type="checkbox" id="multiScanCheck" />
+                    <div class="toggle-track"></div>
+                </div>
+            </label>
+        </div>
+    </div>
     <div style="width:32px;height:32px;background:#4cc9f0;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:900;color:#1a1a2e;font-size:1rem;">T</div>
     <h1>WCS Barcode Scanner &rarr; CSV &nbsp;<span style="font-size:0.75rem;color:#888;">Philip Gilson</span></h1>
 </header>
 
+<!-- ── Additional-scan prompt (shown above scanner in rescan/multi mode) ─── -->
+<div id="rescan-prompt">&#128269; Now Scan Additional Barcode / Serial / MAC Address</div>
+
+<!-- ── Camera card ────────────────────────────────────────────────────────── -->
 <div class="card" id="cameraCard">
     <h2>&#128247; Camera Scanner</h2>
     <div id="scanner-container">
@@ -180,6 +373,7 @@
         <div id="scan-flash"></div>
         <div id="tap-ripple"></div>
         <div id="tap-hint">TAP TO SCAN</div>
+        <div id="scan-label"></div>
     </div>
     <div id="confirm-banner"><span>&#10003;</span>&nbsp;<span id="confirm-text"></span></div>
     <div id="hint"></div>
@@ -193,6 +387,7 @@
     </div>
 </div>
 
+<!-- ── Manual entry ───────────────────────────────────────────────────────── -->
 <div class="card">
     <h2>&#9999;&#65039; Manual Entry</h2>
     <div class="manual-row">
@@ -201,11 +396,12 @@
     </div>
 </div>
 
+<!-- ── Records table ──────────────────────────────────────────────────────── -->
 <div class="card">
     <h2>&#128203; Scanned Records <span class="badge" id="countBadge">0</span></h2>
     <div class="table-wrap">
-        <table>
-            <thead><tr><th>#</th><th>Barcode Value</th><th>Format</th><th>Timestamp</th><th></th></tr></thead>
+        <table id="recordsTable">
+            <thead id="tableHead"></thead>
             <tbody id="tableBody">
                 <tr><td colspan="5" class="empty-msg">No barcodes scanned yet.</td></tr>
             </tbody>
@@ -218,6 +414,7 @@
 </div>
 
 <script>
+    // ── State ─────────────────────────────────────────────────────────────────
     var records     = [];
     var scanning    = false;
     var bannerTimer = null;
@@ -225,6 +422,20 @@
     var lastTime    = 0;
     var COOLDOWN    = 3000;
 
+    // ── Multi-scan state ──────────────────────────────────────────────────────
+    // multiScan: feature toggle from the dropdown menu
+    // colNames:  user-editable display names for the two data columns
+    // rescanTarget: when user clicks a cell to overwrite, stores { rowIdx, col }
+    //               null = normal new-record mode
+    var multiScan    = false;
+    var colNames     = { value: 'Barcode Value', item: 'Scanned Item' };
+    var rescanTarget = null;
+
+    // ── Rename popup state ────────────────────────────────────────────────────
+    var renameCol    = null;   // which col key is being renamed: 'value' or 'item'
+    var renameInputEl = null;
+
+    // ── Engine selection ──────────────────────────────────────────────────────
     // BarcodeDetector = Android Chrome 83+ (confirmed scanning)
     // ZXing           = desktop Chrome / Firefox / Safari (confirmed scanning)
     var useNative = (typeof BarcodeDetector !== 'undefined');
@@ -236,19 +447,16 @@
 
     // ── Tap-to-scan gate ──────────────────────────────────────────────────────
     // Scan loops run continuously but only commit when tapPending = true.
-    // A tap on #scanner-container sets the flag; it clears after one commit.
     var tapPending = false;
 
-    // Set up tap listener on the scanner viewport (not the buttons).
-    // Uses both click and touchend to work on desktop and mobile.
-    // stopPropagation is NOT used — events still reach children normally.
     document.addEventListener('DOMContentLoaded', function() {
+        renameInputEl = document.getElementById('rename-input');
+
         var container = document.getElementById('scanner-container');
         function onTap(e) {
-            if (!scanning) return;              // ignore taps before camera starts
+            if (!scanning) return;
             tapPending = true;
-
-            // Show ripple at tap position
+            // Ripple at tap point
             var rect   = container.getBoundingClientRect();
             var cx     = (e.changedTouches ? e.changedTouches[0].clientX : e.clientX) - rect.left;
             var cy     = (e.changedTouches ? e.changedTouches[0].clientY : e.clientY) - rect.top;
@@ -259,20 +467,136 @@
             void ripple.offsetWidth;
             ripple.classList.add('burst');
         }
-        container.addEventListener('click',     onTap);
-        container.addEventListener('touchend',  onTap, { passive: true });
+        container.addEventListener('click',    onTap);
+        container.addEventListener('touchend', onTap, { passive: true });
+
+        // Close menu when clicking outside it
+        document.addEventListener('click', function(e) {
+            var wrap = document.getElementById('menu-wrap');
+            if (!wrap.contains(e.target)) {
+                document.getElementById('menu-dropdown').classList.remove('open');
+            }
+        });
+
+        // Rename popup: Enter key saves
+        renameInputEl.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') saveRename();
+            if (e.key === 'Escape') closeRename();
+        });
+
+        renderTableHead();
+        loadData();
     });
+
+    // ── Menu ──────────────────────────────────────────────────────────────────
+    function toggleMenu() {
+        document.getElementById('menu-dropdown').classList.toggle('open');
+    }
+
+    function toggleMultiScan() {
+        // The label wraps the toggle, so the checkbox flips automatically.
+        // We read its value on the next tick after the DOM updates.
+        setTimeout(function() {
+            multiScan = document.getElementById('multiScanCheck').checked;
+            if (!multiScan) {
+                // Leaving multi-scan: clear any pending rescan state
+                clearRescanTarget();
+            }
+            renderTableHead();
+            renderTable();
+            updateScanLabel();
+        }, 0);
+    }
 
     // ── Persist ───────────────────────────────────────────────────────────────
     function loadData() {
         try {
             window.db.get('barcode_records').then(function(d) {
-                if (d && d.records) { records = d.records; renderTable(); }
+                if (d && d.records)   { records  = d.records;   renderTable(); }
+                if (d && d.colNames)  { colNames  = d.colNames;  renderTableHead(); }
+                if (d && d.multiScan) {
+                    multiScan = d.multiScan;
+                    document.getElementById('multiScanCheck').checked = multiScan;
+                    renderTableHead();
+                    renderTable();
+                }
             }).catch(function(){});
         } catch(e) {}
     }
     function saveData() {
-        try { window.db.set('barcode_records', { records: records }); } catch(e) {}
+        try { window.db.set('barcode_records', { records:records, colNames:colNames, multiScan:multiScan }); } catch(e) {}
+    }
+
+    // ── Rename popup ──────────────────────────────────────────────────────────
+    function openRename(col) {
+        renameCol = col;
+        document.getElementById('rename-title').textContent = 'Rename Column';
+        renameInputEl.value = colNames[col];
+        document.getElementById('rename-overlay').classList.add('show');
+        setTimeout(function() { renameInputEl.focus(); renameInputEl.select(); }, 50);
+    }
+    function closeRename() {
+        document.getElementById('rename-overlay').classList.remove('show');
+        renameCol = null;
+    }
+    function saveRename() {
+        var raw = renameInputEl.value.trim();
+        if (!raw) { closeRename(); return; }
+        // Save in Proper Case — capitalise first letter of each word
+        colNames[renameCol] = raw.replace(/\w\S*/g, function(w) {
+            return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+        });
+        closeRename();
+        renderTableHead();
+        updateScanLabel();
+        saveData();
+    }
+
+    // ── Rescan target ─────────────────────────────────────────────────────────
+    // Called when user clicks a data cell in the table during multi-scan mode.
+    // col = 'value' (primary barcode) or 'item' (secondary scanned item).
+    function selectRescan(rowIdx, col) {
+        rescanTarget = { rowIdx: rowIdx, col: col };
+
+        // Amber overlay on scanner viewport — signals rescan mode
+        document.getElementById('scanner-container').classList.add('rescan-mode');
+        document.getElementById('tap-hint').textContent = 'TAP TO RESCAN';
+
+        // Show the "Now Scan Additional" prompt when overwriting the item column
+        if (col === 'item') {
+            document.getElementById('rescan-prompt').style.display = 'block';
+        } else {
+            document.getElementById('rescan-prompt').style.display = 'none';
+        }
+
+        renderTable(); // re-render to highlight the selected cell
+        updateScanLabel();
+    }
+
+    function clearRescanTarget() {
+        rescanTarget = null;
+        document.getElementById('scanner-container').classList.remove('rescan-mode');
+        document.getElementById('rescan-prompt').style.display = 'none';
+        if (scanning) {
+            document.getElementById('tap-hint').textContent = 'TAP TO SCAN';
+        }
+        renderTable();
+        updateScanLabel();
+    }
+
+    // ── Scan label ───────────────────────────────────────────────────────────
+    // Computes the correct "Scan [header]" text based on current state and
+    // updates the top-left overlay on the video. Called wherever state changes.
+    function updateScanLabel() {
+        var el = document.getElementById('scan-label');
+        if (!scanning) { el.style.display = 'none'; return; }
+
+        // Which column are we about to scan?
+        // rescanTarget tells us if we are mid-row (overwrite or item chain).
+        // Otherwise we are scanning the primary column (value) for a new row.
+        var col = (rescanTarget !== null) ? rescanTarget.col : 'value';
+        el.textContent = 'Scan ' + colNames[col];
+        el.style.display = 'block';
     }
 
     // ── Start ─────────────────────────────────────────────────────────────────
@@ -290,44 +614,31 @@
         nativeDetector = new BarcodeDetector({
             formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf']
         });
-
         navigator.mediaDevices.getUserMedia({
             audio: false,
-            video: {
-                facingMode: { ideal: 'environment' },
-                width:  { ideal: 1280 },
-                height: { ideal: 720 }
-            }
+            video: { facingMode: { ideal: 'environment' }, width: { ideal:1280 }, height: { ideal:720 } }
         }).then(function(stream) {
             nativeStream = stream;
             var video = document.getElementById('camVideo');
             video.srcObject = stream;
             video.play();
-
-            // ── Black screen fix ───────────────────────────────────────────────
-            // Android Chrome's GPU compositor doesn't flush the video texture
-            // until videoWidth > 0 — meaning real decoded frames exist in memory.
-            // We poll via rAF until that moment, then nudge the opacity to force
-            // the compositor to push the frame to screen. This is what lock/unlock
-            // was doing manually — we replicate it programmatically.
+            // Poll until videoWidth > 0 (GPU has real frames), then force compositor flush
             function waitForFrame() {
                 if (video.videoWidth > 0) {
-                    // Frames are decoded — force GPU compositor flush
                     video.style.opacity = '0.99';
                     requestAnimationFrame(function() {
                         video.style.opacity = '1';
                         scanning = true;
                         setStatus('active', 'Tap viewport to scan');
                         document.getElementById('tap-hint').style.display = 'block';
+                        updateScanLabel();
                         nativeScanFrame();
                     });
                 } else {
-                    // Not ready yet — keep polling (usually resolves in <500ms)
                     requestAnimationFrame(waitForFrame);
                 }
             }
             requestAnimationFrame(waitForFrame);
-
         }).catch(function(err) {
             setStatus('error', 'Camera error: ' + err.message);
             console.error('getUserMedia error:', err);
@@ -341,11 +652,9 @@
         var video = document.getElementById('camVideo');
         if (video.readyState >= 2 && video.videoWidth > 0) {
             nativeDetector.detect(video).then(function(barcodes) {
-                // Only commit when user has tapped the viewport
                 if (barcodes.length > 0 && tapPending) {
-                    tapPending = false;   // consume the tap — one tap, one scan
-                    var bc  = barcodes[0];
-                    var now = Date.now();
+                    tapPending = false;
+                    var bc = barcodes[0]; var now = Date.now();
                     if (!(bc.rawValue === lastCode && (now - lastTime) < COOLDOWN)) {
                         lastCode = bc.rawValue; lastTime = now;
                         commitScan(bc.rawValue, bc.format);
@@ -367,14 +676,12 @@
 
     // ══════════════════════════════════════════════════════════════════════════
     // DESKTOP — ZXing (Chrome, Firefox, Safari)
-    // decodeFromVideoDevice(null, ...) confirmed fast and working on laptop.
     // ══════════════════════════════════════════════════════════════════════════
     function startZXing() {
         zxReader = new ZXing.BrowserMultiFormatReader();
         zxReader.decodeFromVideoDevice(null, 'camVideo', function(result, err) {
-            // Only commit when user has tapped the viewport
             if (!result || !tapPending) return;
-            tapPending = false;   // consume the tap — one tap, one scan
+            tapPending = false;
             var code = result.getText();
             var fmt  = result.getBarcodeFormat();
             var now  = Date.now();
@@ -386,6 +693,8 @@
         }).then(function() {
             scanning = true;
             setStatus('active', 'Tap viewport to scan');
+            document.getElementById('tap-hint').style.display = 'block';
+            updateScanLabel();
         }).catch(function(err) {
             setStatus('error', 'Camera error: ' + err.message);
             console.error('ZXing error:', err);
@@ -402,18 +711,22 @@
     function stopScanner() {
         scanning = false;
         if (useNative) { stopNative(); } else { stopZXing(); }
-        lastCode = ''; lastTime = 0;
+        lastCode = ''; lastTime = 0; tapPending = false;
         document.getElementById('startBtn').style.display = '';
         document.getElementById('stopBtn').style.display  = 'none';
         document.getElementById('confirm-banner').classList.remove('show');
-        tapPending = false;
         document.getElementById('tap-hint').style.display = 'none';
+        document.getElementById('scan-label').style.display = 'none';
+        clearRescanTarget();
         setStatus('idle', 'Camera stopped');
         setHint('');
     }
 
     // ── Commit ────────────────────────────────────────────────────────────────
+    // If rescanTarget is set: overwrite that cell and clear the target.
+    // Otherwise: add a new record as normal.
     function commitScan(code, format) {
+        // Flash feedback always fires
         var fl = document.getElementById('scan-flash');
         fl.classList.remove('pop'); void fl.offsetWidth; fl.classList.add('pop');
 
@@ -428,8 +741,33 @@
             document.getElementById('confirm-banner').classList.remove('show');
         }, 3000);
 
+        if (rescanTarget !== null) {
+            // ── Rescan / item-chain overwrite ────────────────────────────────
+            // Write scanned value into the targeted field, then decide what next:
+            // If we just filled the 'item' column (end of chain) → clear target.
+            // If we just filled the 'value' column via manual rescan → clear too.
+            records[rescanTarget.rowIdx][rescanTarget.col] = code;
+            renderTable(); saveData();
+            clearRescanTarget();
+        } else {
+            // ── Normal new-record mode ───────────────────────────────────────
+            addRecord(code, format);
+
+            // Auto-chain in multi-scan: after the primary (value) scan, immediately
+            // queue up scanning the item column on the same new row.
+            // The scanner stays in amber/rescan-mode; user just taps again.
+            if (multiScan) {
+                var newIdx = records.length - 1;
+                rescanTarget = { rowIdx: newIdx, col: 'item' };
+                document.getElementById('scanner-container').classList.add('rescan-mode');
+                document.getElementById('tap-hint').textContent = 'TAP TO RESCAN';
+                document.getElementById('rescan-prompt').style.display = 'block';
+                renderTable();   // highlight the new item cell
+                updateScanLabel();
+            }
+        }
+
         setHint('');
-        addRecord(code, format);
     }
 
     // ── UI ────────────────────────────────────────────────────────────────────
@@ -445,7 +783,7 @@
     // ── Records ───────────────────────────────────────────────────────────────
     function addRecord(value, format) {
         var ts = new Date().toISOString().replace('T',' ').substring(0,19);
-        records.push({ value:value, format:format||'manual', ts:ts });
+        records.push({ value:value, item:'', format:format||'manual', ts:ts });
         renderTable(); saveData();
     }
     function addManual() {
@@ -453,24 +791,81 @@
         var val = input.value.trim(); if (!val) return;
         addRecord(val, 'manual'); input.value = '';
     }
-    document.getElementById('manualInput').addEventListener('keydown', function(e) {
-        if (e.key === 'Enter') addManual();
+    document.addEventListener('DOMContentLoaded', function() {
+        document.getElementById('manualInput').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') addManual();
+        });
     });
     function deleteRecord(idx) { records.splice(idx,1); renderTable(); saveData(); }
-    function clearAll() { if(!records.length) return; records=[]; renderTable(); saveData(); }
+    function clearAll() { if(!records.length) return; records=[]; clearRescanTarget(); renderTable(); saveData(); }
 
-    // ── Render ────────────────────────────────────────────────────────────────
+    // ── Render table head ─────────────────────────────────────────────────────
+    // Rebuilds the <thead> row. In multi-scan mode an extra "Scanned Item" column
+    // is injected between "Barcode Value" and "Format". Both data column headers
+    // are clickable to open the rename popup.
+    function renderTableHead() {
+        var thead = document.getElementById('tableHead');
+        var colSpan = multiScan ? 6 : 5;
+
+        var html = '<tr><th>#</th>';
+
+        // "Barcode Value" header — always editable
+        html += '<th class="editable" onclick="openRename(\'value\')">' + esc(colNames.value) + '</th>';
+
+        // "Scanned Item" header — only in multi-scan mode
+        if (multiScan) {
+            html += '<th class="editable" onclick="openRename(\'item\')">' + esc(colNames.item) + '</th>';
+        }
+
+        html += '<th>Format</th><th>Timestamp</th><th></th></tr>';
+        thead.innerHTML = html;
+
+        // Keep empty-row colspan in sync
+        var emptyRow = document.querySelector('#tableBody .empty-msg');
+        if (emptyRow) emptyRow.setAttribute('colspan', colSpan);
+    }
+
+    // ── Render table body ─────────────────────────────────────────────────────
+    // In multi-scan mode, data cells are clickable to enter rescan mode.
+    // The currently selected rescan cell gets the 'rescan-selected' class.
     function renderTable() {
         var tbody = document.getElementById('tableBody');
+        var colSpan = multiScan ? 6 : 5;
         document.getElementById('countBadge').textContent = records.length;
+
         if (!records.length) {
-            tbody.innerHTML = '<tr><td colspan="5" class="empty-msg">No barcodes scanned yet.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="' + colSpan + '" class="empty-msg">No barcodes scanned yet.</td></tr>';
             return;
         }
-        tbody.innerHTML = records.map(function(r,i) {
-            return '<tr><td>'+(i+1)+'</td><td><strong>'+esc(r.value)+'</strong></td><td>'+esc(r.format)+'</td><td>'+esc(r.ts)+'</td><td><button class="del-btn" onclick="deleteRecord('+i+')">&#10005;</button></td></tr>';
+
+        tbody.innerHTML = records.map(function(r, i) {
+            // Determine if each cell is the selected rescan target
+            var valueSelected = rescanTarget && rescanTarget.rowIdx === i && rescanTarget.col === 'value';
+            var itemSelected  = rescanTarget && rescanTarget.rowIdx === i && rescanTarget.col === 'item';
+
+            var valueCls = multiScan ? ('rescannable' + (valueSelected ? ' rescan-selected' : '')) : '';
+            var itemCls  = multiScan ? ('rescannable' + (itemSelected  ? ' rescan-selected' : '')) : '';
+
+            var valueClick = multiScan ? ' onclick="selectRescan(' + i + ', \'value\')"' : '';
+            var itemClick  = multiScan ? ' onclick="selectRescan(' + i + ', \'item\')"'  : '';
+
+            var row = '<tr>';
+            row += '<td>' + (i + 1) + '</td>';
+            row += '<td class="' + valueCls + '"' + valueClick + '><strong>' + esc(r.value) + '</strong></td>';
+
+            if (multiScan) {
+                var itemDisplay = r.item ? ('<strong>' + esc(r.item) + '</strong>') : '<span style="color:#555;font-style:italic;">—</span>';
+                row += '<td class="' + itemCls + '"' + itemClick + '>' + itemDisplay + '</td>';
+            }
+
+            row += '<td>' + esc(r.format) + '</td>';
+            row += '<td>' + esc(r.ts) + '</td>';
+            row += '<td><button class="del-btn" onclick="deleteRecord(' + i + ')">&#10005;</button></td>';
+            row += '</tr>';
+            return row;
         }).join('');
     }
+
     function esc(s) {
         return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
@@ -478,18 +873,25 @@
     // ── CSV ───────────────────────────────────────────────────────────────────
     function downloadCSV() {
         if (!records.length) { setStatus('error','Nothing to export!'); setTimeout(function(){setStatus('idle','');},2000); return; }
-        var header = ['#','Barcode Value','Format','Timestamp'];
-        var rows = records.map(function(r,i) {
-            return [i+1,'"'+r.value.replace(/"/g,'""')+'"','"'+r.format+'"','"'+r.ts+'"'];
+
+        var header = multiScan
+            ? ['#', colNames.value, colNames.item, 'Format', 'Timestamp']
+            : ['#', colNames.value, 'Format', 'Timestamp'];
+
+        var rows = records.map(function(r, i) {
+            var base = [i+1, '"'+r.value.replace(/"/g,'""')+'"'];
+            if (multiScan) base.push('"'+(r.item||'').replace(/"/g,'""')+'"');
+            base.push('"'+r.format+'"', '"'+r.ts+'"');
+            return base;
         });
+
         var csv = [header.join(',')].concat(rows.map(function(r){return r.join(',');})).join('\r\n');
         var blob = new Blob([csv],{type:'text/csv;charset=utf-8;'});
         var name = 'barcodes_'+new Date().toISOString().slice(0,10)+'.csv';
         if (window.fs && window.fs.downloadFile) { window.fs.downloadFile(blob,name); }
         else { var url=URL.createObjectURL(blob); var a=document.createElement('a'); a.href=url; a.download=name; a.click(); URL.revokeObjectURL(url); }
     }
-
-    loadData();
 </script>
 </body>
 </html>
+
