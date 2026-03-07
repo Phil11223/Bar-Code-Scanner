@@ -129,6 +129,10 @@
             position: absolute; top: 0; left: 0;
             width: 100%; height: 100%;
             object-fit: cover; display: block;
+            /* Own GPU layer — isolates per-frame video texture updates from
+               the scan-line's compositor animation. Without this the video
+               repaints bleed into the scan-line layer causing stutter. */
+            will-change: transform;
         }
         .scan-overlay {
             position: absolute; top: 50%; left: 50%;
@@ -764,32 +768,47 @@
                                 requestAnimationFrame(zxMobileTick); return;
                             }
 
-                            // Determine rotation from screen orientation API.
-                            // angle=0   → landscape or no rotation (draw straight)
-                            // angle=90  → phone held portrait, sensor rotated 90°
-                            // angle=270 → phone held portrait, sensor rotated 270°
-                            var angle = (window.screen && window.screen.orientation)
-                                        ? (window.screen.orientation.angle || 0)
-                                        : 0;
                             var w = vid.videoWidth, h = vid.videoHeight;
-                            var rotated = (angle === 90 || angle === 270);
-                            zxMobileCanvas.width  = rotated ? h : w;
-                            zxMobileCanvas.height = rotated ? w : h;
 
+                            // Draw straight — modern Chrome already applies EXIF
+                            // orientation when drawImage copies from a <video> element.
+                            // Do NOT also rotate by screen.orientation.angle — that
+                            // would double-rotate and corrupt the pixels.
+                            zxMobileCanvas.width  = w;
+                            zxMobileCanvas.height = h;
                             var ctx = zxMobileCanvas.getContext('2d');
-                            ctx.save();
-                            ctx.translate(zxMobileCanvas.width / 2, zxMobileCanvas.height / 2);
-                            ctx.rotate(angle * Math.PI / 180);
-                            ctx.drawImage(vid, -w / 2, -h / 2, w, h);
-                            ctx.restore();
+                            ctx.drawImage(vid, 0, 0, w, h);
 
-                            var result = null;
-                            // Pass 1: no EAN-8 — avoids false positives on longer barcodes
-                            try { result = zxMobilePref.decodeFromCanvas(zxMobileCanvas); }
-                            catch(e1) {
-                                // Pass 2: adds EAN-8 for genuine tiny retail items
-                                try { result = zxMobileFb.decodeFromCanvas(zxMobileCanvas); }
-                                catch(e2) { /* nothing found this frame */ }
+                            // Decode attempt — two-pass per orientation:
+                            //   preferred (no EAN-8) first to avoid false positives,
+                            //   fallback (with EAN-8) if preferred finds nothing.
+                            function tryDecode(cnv) {
+                                try { return zxMobilePref.decodeFromCanvas(cnv); } catch(e) {}
+                                try { return zxMobileFb.decodeFromCanvas(cnv);   } catch(e) {}
+                                return null;
+                            }
+
+                            // Pass A: straight (browser-corrected orientation)
+                            var result = tryDecode(zxMobileCanvas);
+
+                            // Pass B: if straight fails, try all 4 rotations.
+                            // Handles older Android WebView that doesn't auto-correct.
+                            if (!result) {
+                                var rotCanvas = document.createElement('canvas');
+                                var rotAngles = [90, 180, 270];
+                                for (var ri = 0; ri < rotAngles.length && !result; ri++) {
+                                    var deg     = rotAngles[ri];
+                                    var swapped = (deg === 90 || deg === 270);
+                                    rotCanvas.width  = swapped ? h : w;
+                                    rotCanvas.height = swapped ? w : h;
+                                    var rc = rotCanvas.getContext('2d');
+                                    rc.save();
+                                    rc.translate(rotCanvas.width / 2, rotCanvas.height / 2);
+                                    rc.rotate(deg * Math.PI / 180);
+                                    rc.drawImage(vid, -w / 2, -h / 2, w, h);
+                                    rc.restore();
+                                    result = tryDecode(rotCanvas);
+                                }
                             }
 
                             if (result) {
