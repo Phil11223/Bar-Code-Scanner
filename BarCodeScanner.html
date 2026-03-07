@@ -351,7 +351,7 @@
             <label class="menu-item" onclick="toggleMultiScan()">
                 <span>&#9635; Multi-Scan</span>
                 <div class="toggle-switch">
-                    <input type="checkbox" id="multiScanCheck" />
+                    <input type="checkbox" id="multiScanCheck" autocomplete="off" />
                     <div class="toggle-track"></div>
                 </div>
             </label>
@@ -455,6 +455,10 @@
     var tapPending = false;
 
     document.addEventListener('DOMContentLoaded', function() {
+        // Force toggle off on every load — multi-scan never persists between sessions
+        document.getElementById('multiScanCheck').checked = false;
+        multiScan = false;
+
         renameInputEl = document.getElementById('rename-input');
 
         var container = document.getElementById('scanner-container');
