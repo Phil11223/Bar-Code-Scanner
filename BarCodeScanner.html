@@ -451,6 +451,7 @@
     var records     = [];
     var scanning    = false;
     var tapPending  = false;   // true = user has tapped, one scan allowed
+    var tapTimer    = null;    // setTimeout handle — cancels scan attempt after 1s
     var bannerTimer = null;
     var lastCode    = '';
     var lastTime    = 0;
@@ -568,6 +569,22 @@
         });
     }
 
+    // ── Tap timeout helpers ──────────────────────────────────────────────────
+    // cancelTapTimeout: clears any running 1s timeout (called on success/stop).
+    // resetTapGate: called when timeout fires — cancels the scan loop and resets
+    //               UI back to "waiting for tap" state without stopping the camera.
+    function cancelTapTimeout() {
+        if (tapTimer) { clearTimeout(tapTimer); tapTimer = null; }
+    }
+    function resetTapGate() {
+        tapTimer   = null;
+        tapPending = false;
+        // Cancel any in-flight rAF loop
+        if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
+        setStatus('active', 'Point camera at barcode, then tap to scan');
+        dbg('Tap timeout — no barcode found, waiting for next tap');
+    }
+
     // ── nativeScanFrame ───────────────────────────────────────────────────────
     // Started ONLY from onTap — NEVER auto-started when camera opens.
     // Runs rAF frames until a barcode is found, then stops.
@@ -583,7 +600,8 @@
                 var bc  = barcodes[0];
                 var now = Date.now();
                 if (bc.rawValue === lastCode && (now - lastTime) < COOLDOWN) return;
-                // ── Barcode found — consume the tap and stop the loop ─────────
+                // ── Barcode found — consume the tap, clear timer, stop loop ──
+                cancelTapTimeout();
                 tapPending = false;
                 dbg('BD FOUND: ' + bc.rawValue + ' (' + bc.format + ')');
                 lastCode = bc.rawValue; lastTime = now;
@@ -631,6 +649,7 @@
             var now     = Date.now();
             if (!code || code.length < 3) return;
             if (code === lastCode && (now - lastTime) < COOLDOWN) return;
+            cancelTapTimeout();
             tapPending = false;   // consumed — wait for next tap
             dbg('ZXing FOUND: ' + code + ' (' + fmtName + ')');
             lastCode = code; lastTime = now;
@@ -658,6 +677,7 @@
     // Routes teardown to the correct engine, then resets shared UI state.
     function stopScanner() {
         scanning   = false;
+        cancelTapTimeout();
         tapPending = false;   // clear gate so next session starts clean
         if (useNative) { stopNative(); } else { stopZXing(); }
         hideTorchBtn();
@@ -908,8 +928,17 @@
             // Set the gate, then explicitly kick off the native loop if on mobile.
             // ZXing (desktop) already has its own internal loop — the gate alone
             // is enough to let the next callback through.
+            // ── Start scan gate ───────────────────────────────────────────
+            // Clear any leftover timer from a previous tap first.
+            cancelTapTimeout();
             tapPending = true;
             setStatus('active', 'Scanning...');
+
+            // ── 1-second timeout ──────────────────────────────────────────────
+            // If no barcode is found within 1s, cancel the attempt and reset
+            // back to the "tap to scan" idle state. Camera stays live.
+            tapTimer = setTimeout(resetTapGate, 1000);
+
             if (useNative) {
                 // Cancel any previous loop handle before starting fresh
                 if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
