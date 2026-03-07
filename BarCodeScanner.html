@@ -487,6 +487,40 @@
     var isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
     console.log('Device: ' + (isMobile ? 'mobile' : 'desktop'));
 
+    // ── ZXing decode hints ────────────────────────────────────────────────────
+    // Two passes per decode attempt:
+    //   Preferred (no EAN-8): tried first every tick — avoids false positives
+    //     where ZXing misreads a partial Code128/ITF slice as an 8-digit EAN.
+    //   Fallback (adds EAN-8): only tried if preferred finds nothing.
+    //   TRY_HARDER: essential for ITF barcodes (uniform narrow bars, easy to miss).
+    var PREFERRED_FORMATS = [
+        ZXing.BarcodeFormat.CODE_128,
+        ZXing.BarcodeFormat.ITF,
+        ZXing.BarcodeFormat.CODE_39,
+        ZXing.BarcodeFormat.CODE_93,
+        ZXing.BarcodeFormat.CODABAR,
+        ZXing.BarcodeFormat.EAN_13,
+        ZXing.BarcodeFormat.UPC_A,
+        ZXing.BarcodeFormat.UPC_E,
+        ZXing.BarcodeFormat.QR_CODE,
+        ZXing.BarcodeFormat.DATA_MATRIX,
+        ZXing.BarcodeFormat.PDF_417,
+        ZXing.BarcodeFormat.AZTEC
+    ];
+    var zxHintsPreferred = (function() {
+        var h = new Map();
+        h.set(ZXing.DecodeHintType.TRY_HARDER, true);
+        h.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, PREFERRED_FORMATS);
+        return h;
+    })();
+    var zxHintsFallback = (function() {
+        var h = new Map();
+        h.set(ZXing.DecodeHintType.TRY_HARDER, true);
+        h.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,
+            PREFERRED_FORMATS.concat([ZXing.BarcodeFormat.EAN_8]));
+        return h;
+    })();
+
     // ── Unified stream state ──────────────────────────────────────────────────
     // One stream, one canvas, one interval — no dual-engine confusion.
     var scanStream = null;   // single MediaStream reference
@@ -673,20 +707,28 @@
     // Button shown on all mobile devices; hidden only if applyConstraints rejects.
     var torchOn = false;
     function toggleTorch() {
-        if (!scanStream) return;
+        dbg('torch tapped — scanStream=' + !!scanStream + ' torchOn=' + torchOn);
+        if (!scanStream) { dbg('torch: no stream'); return; }
         var track = scanStream.getVideoTracks()[0];
-        if (!track || !track.applyConstraints) {
-            document.getElementById('torch-btn').style.display = 'none';
-            return;
+        if (!track) { dbg('torch: no track'); return; }
+        if (!track.applyConstraints) { dbg('torch: applyConstraints missing'); document.getElementById('torch-btn').style.display = 'none'; return; }
+
+        // Log capabilities so we can see if torch is listed
+        if (track.getCapabilities) {
+            var caps = track.getCapabilities();
+            dbg('torch caps: ' + JSON.stringify(caps).slice(0,120));
         }
+
         torchOn = !torchOn;
+        dbg('torch: calling applyConstraints torch=' + torchOn);
         track.applyConstraints({ advanced: [{ torch: torchOn }] })
             .then(function() {
+                dbg('torch: applyConstraints resolved OK');
                 var btn = document.getElementById('torch-btn');
                 torchOn ? btn.classList.add('on') : btn.classList.remove('on');
             })
-            .catch(function() {
-                // Device doesn't support torch — hide the button
+            .catch(function(e) {
+                dbg('torch: FAILED — ' + (e && e.message ? e.message : String(e)));
                 torchOn = false;
                 document.getElementById('torch-btn').style.display = 'none';
             });
