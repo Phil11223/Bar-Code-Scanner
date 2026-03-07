@@ -720,31 +720,46 @@
         var opts = (formats && formats.length) ? { formats: formats } : {};
         nativeDetector = new BarcodeDetector(opts);
 
-        var videoConstraints = {
-            facingMode:  { ideal: 'environment' },
-            width:       { ideal: 1920 },
-            height:      { ideal: 1080 },
-            // Continuous autofocus — critical for close-up barcode sharpness
-            focusMode:   { ideal: 'continuous' },
-            // Advanced constraints applied after track is open
-            advanced: [{ focusMode: 'continuous' }]
-        };
-        navigator.mediaDevices.getUserMedia({ audio: false, video: videoConstraints })
+        // ── getUserMedia constraints ──────────────────────────────────────────
+        // ONLY use constraints that are valid at the getUserMedia level.
+        // focusMode is NOT a valid top-level MediaTrackConstraint — it must be
+        // applied via applyConstraints() AFTER the stream is open, otherwise
+        // some devices reject the entire getUserMedia call silently.
+        navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {
+                facingMode: { ideal: 'environment' },
+                width:      { ideal: 1280 },
+                height:     { ideal: 720 }
+            }
+        })
         .then(function(stream) {
             nativeStream = stream;
-            // Apply advanced track constraints (autofocus, white balance)
-            // These may silently fail on devices that don't support them
             var track = stream.getVideoTracks()[0];
+
+            // ── Autofocus: applied after stream opens via applyConstraints ────
+            // advanced[] is the correct way to request focusMode — never put it
+            // in the top-level getUserMedia constraints.
             if (track && track.applyConstraints) {
                 track.applyConstraints({
-                    advanced: [{ focusMode: 'continuous', whiteBalanceMode: 'continuous' }]
+                    advanced: [{ focusMode: 'continuous' }]
                 }).catch(function(){});
             }
+
+            // ── Torch: show button on mobile, probe by attempting to apply ────
+            // getCapabilities().torch is unreliable on many Android devices —
+            // it often returns {} even when torch IS supported.
+            // Instead, show the button on all mobile devices and attempt
+            // applyConstraints({torch:true}) when tapped. Hide on failure.
+            if (isMobile) {
+                document.getElementById('torch-btn').style.display = 'flex';
+            }
+
             var video = document.getElementById('camVideo');
             video.srcObject = stream;
             video.play();
 
-            // Poll until GPU has real frames, then start both engines
+            // ── Poll until video has real frames ─────────────────────────────
             function waitForFrame() {
                 if (video.videoWidth > 0) {
                     video.style.opacity = '0.99';
@@ -754,127 +769,57 @@
                         setStatus('active', 'Tap viewport to scan');
                         document.getElementById('tap-hint').style.display = 'block';
                         updateScanLabel();
-                        showTorchBtn();   // probe torch capability, show if available
 
-                        // Engine 1: BarcodeDetector rAF loop (native, fast for QR/EAN)
+                        // ── Engine 1: BarcodeDetector (native OS chip) ────────
+                        // Runs every rAF frame — handles QR, EAN-13, UPC-A etc.
+                        // fast because it runs in native code outside the JS thread.
                         nativeScanFrame();
 
-                        // Engine 2: ZXing fresh-reader-per-tap.
-                        // Key insight: ZXing deduplication is per-reader-instance.
-                        // Creating a new reader on every tap gives it zero history —
-                        // it decodes whatever is in frame immediately, no throttling.
-                        // decodeFromVideoDevice reads the live stream so Android's
-                        // EXIF orientation is handled correctly (no canvas needed).
-                        // ── ZXing mobile: orientation-aware canvas rAF loop ────────────
-                        // WHY canvas instead of decodeFromStream:
-                        //   decodeFromStream gives ZXing its own internal video element.
-                        //   That element has no EXIF correction → portrait-mode phones
-                        //   deliver sideways pixels → wrong Code128 sub-table → garbage.
-                        //   By capturing to our own canvas and rotating by
-                        //   screen.orientation.angle we guarantee correctly-oriented
-                        //   pixels every time, regardless of how the phone is held.
-                        //
-                        // TWO-PASS per frame:
-                        //   Pass 1 (preferred, no EAN-8) — tried first every frame
-                        //   Pass 2 (fallback, adds EAN-8) — only if pass 1 misses
-                        //   This prevents EAN-8 false-positives on Code128/ITF barcodes
-                        //   while keeping EAN-8 available for genuine tiny retail items.
+                        // ── Engine 2: ZXing canvas decode (software) ──────────
+                        // Runs every 300ms — catches formats BarcodeDetector misses
+                        // (Code128 variants, ITF, Codabar). Canvas is full frame so
+                        // no barcode is accidentally outside the crop region.
+                        // Two ZXing reader instances: preferred (no EAN-8) tried
+                        // first each tick, fallback (with EAN-8) only if preferred
+                        // finds nothing — prevents EAN-8 false positives.
+                        var zxC = document.createElement('canvas');
+                        zxC.style.display = 'none';
+                        document.body.appendChild(zxC);
+                        var zxPref = new ZXing.BrowserMultiFormatReader(zxHintsPreferred);
+                        var zxFb   = new ZXing.BrowserMultiFormatReader(zxHintsFallback);
 
-                        var zxMobileCanvas = document.createElement('canvas');
-                        zxMobileCanvas.style.display = 'none';
-                        document.body.appendChild(zxMobileCanvas);
-
-                        // Readers are created once — canvas decode is synchronous so
-                        // there is no internal stream state to cause deduplication.
-                        var zxMobilePref = new ZXing.BrowserMultiFormatReader(zxHintsPreferred);
-                        var zxMobileFb   = new ZXing.BrowserMultiFormatReader(zxHintsFallback);
-
-                        // Pre-allocate ONE rotation canvas — reused every attempt,
-                        // never recreated. Creating a new canvas every frame was
-                        // thrashing the GPU memory allocator and GC.
-                        var rotCanvas = document.createElement('canvas');
-                        rotCanvas.style.display = 'none';
-                        document.body.appendChild(rotCanvas);
-
-                        // tryDecode: preferred pass (no EAN-8) first to avoid false
-                        // positives on longer barcodes, fallback (with EAN-8) only
-                        // if preferred finds nothing.
-                        function tryDecode(cnv) {
-                            try { return zxMobilePref.decodeFromCanvas(cnv); } catch(e) {}
-                            try { return zxMobileFb.decodeFromCanvas(cnv);   } catch(e) {}
-                            return null;
-                        }
-
-                        // ZXing runs on a 150ms interval instead of every rAF frame.
-                        // BarcodeDetector (Engine 1) still runs on rAF for fast native
-                        // barcodes like UPC-A/EAN-13/QR. ZXing only needs to fire a few
-                        // times per second to catch the barcodes BarcodeDetector misses.
-                        // This stops ZXing canvas work from competing with the video
-                        // texture upload that happens every rAF frame.
-                        function zxMobileTick() {
-                            if (!scanning) {
-                                zxMobileCanvas.remove();
-                                rotCanvas.remove();
-                                return;
-                            }
-                            setTimeout(zxMobileTick, 150);
+                        function zxTick() {
+                            if (!scanning) { zxC.remove(); return; }
+                            setTimeout(zxTick, 300);
                             if (!tapPending) return;
-
                             var vid = document.getElementById('camVideo');
                             if (!vid || vid.videoWidth === 0 || vid.readyState < 2) return;
 
-                            var vw = vid.videoWidth, vh = vid.videoHeight;
+                            // Full frame draw — no crop, no rotation transform.
+                            // Chrome handles EXIF rotation when drawImage reads
+                            // from a <video> element on Android.
+                            zxC.width  = vid.videoWidth;
+                            zxC.height = vid.videoHeight;
+                            zxC.getContext('2d').drawImage(vid, 0, 0);
 
-                            // ── Crop to scan overlay region ───────────────────────
-                            // Decoding the full 1080p frame is very slow on mobile JS.
-                            // The scan overlay covers 92% width × 38% height centred
-                            // in the frame — we decode only that strip.
-                            // This is 90% fewer pixels → 10× faster ZXing decode.
-                            var cropW = Math.round(vw * 0.92);
-                            var cropH = Math.round(vh * 0.38);
-                            var cropX = Math.round((vw - cropW) / 2);
-                            var cropY = Math.round((vh - cropH) / 2);
-
-                            zxMobileCanvas.width  = cropW;
-                            zxMobileCanvas.height = cropH;
-                            zxMobileCanvas.getContext('2d')
-                                .drawImage(vid, cropX, cropY, cropW, cropH,
-                                                0,     0,     cropW, cropH);
-
-                            var result = tryDecode(zxMobileCanvas);
-
-                            // Rotation fallback: older Android WebView skips EXIF correction
+                            var result = null;
+                            try { result = zxPref.decodeFromCanvas(zxC); } catch(e) {}
                             if (!result) {
-                                var rotAngles = [90, 180, 270];
-                                for (var ri = 0; ri < rotAngles.length && !result; ri++) {
-                                    var deg     = rotAngles[ri];
-                                    var swapped = (deg === 90 || deg === 270);
-                                    rotCanvas.width  = swapped ? cropH : cropW;
-                                    rotCanvas.height = swapped ? cropW : cropH;
-                                    var rc = rotCanvas.getContext('2d');
-                                    rc.save();
-                                    rc.translate(rotCanvas.width / 2, rotCanvas.height / 2);
-                                    rc.rotate(deg * Math.PI / 180);
-                                    rc.drawImage(vid, cropX, cropY, cropW, cropH,
-                                                     -cropW / 2, -cropH / 2, cropW, cropH);
-                                    rc.restore();
-                                    result = tryDecode(rotCanvas);
-                                }
+                                try { result = zxFb.decodeFromCanvas(zxC); } catch(e) {}
                             }
+                            if (!result) return;
 
-                            if (result) {
-                                var code    = result.getText();
-                                var fmt     = result.getBarcodeFormat();
-                                var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
-                                if (code && code.length >= 3 &&
-                                    !(code === lastCode && (Date.now() - lastTime) < COOLDOWN)) {
-                                    tapPending = false;
-                                    lastCode = code; lastTime = Date.now();
-                                    commitScan(code, fmtName);
-                                }
+                            var code    = result.getText();
+                            var fmt     = result.getBarcodeFormat();
+                            var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
+                            if (code && code.length >= 3 &&
+                                !(code === lastCode && (Date.now() - lastTime) < COOLDOWN)) {
+                                tapPending = false;
+                                lastCode = code; lastTime = Date.now();
+                                commitScan(code, fmtName);
                             }
                         }
-                        zxMobileTick();
+                        zxTick();
                     });
                 } else {
                     requestAnimationFrame(waitForFrame);
@@ -1106,39 +1051,38 @@
     // torch:true is a MediaTrackConstraint — silently ignored on desktop or
     // devices that don't expose the torch capability.
     var torchOn = false;
+
+    // ── Torch / flashlight ────────────────────────────────────────────────────
+    // Works on Android Chrome (torch constraint via MediaTrackConstraints) and
+    // iOS Safari 15.4+ (same API). We do NOT rely on getCapabilities().torch
+    // because many devices return {} from getCapabilities even when torch works.
+    // Instead: show the button on all mobile devices and attempt applyConstraints
+    // when tapped — hide the button only if applyConstraints actually rejects.
     function toggleTorch() {
         if (!nativeStream) return;
         var track = nativeStream.getVideoTracks()[0];
-        if (!track) return;
+        if (!track || !track.applyConstraints) {
+            document.getElementById('torch-btn').style.display = 'none';
+            return;
+        }
         torchOn = !torchOn;
         track.applyConstraints({ advanced: [{ torch: torchOn }] })
             .then(function() {
+                // Constraint accepted — update button state
                 var btn = document.getElementById('torch-btn');
                 torchOn ? btn.classList.add('on') : btn.classList.remove('on');
             })
             .catch(function() {
-                // Device doesn't support torch — hide the button
+                // Device genuinely doesn't support torch constraint — hide button
                 torchOn = false;
                 document.getElementById('torch-btn').style.display = 'none';
             });
-    }
-    function showTorchBtn() {
-        // Only show torch button on mobile — probe capability first
-        if (!isMobile || !nativeStream) return;
-        var track = nativeStream.getVideoTracks()[0];
-        if (!track) return;
-        var caps = track.getCapabilities ? track.getCapabilities() : {};
-        if (caps.torch) {
-            var btn = document.getElementById('torch-btn');
-            btn.style.display = 'flex';
-        }
     }
     function hideTorchBtn() {
         torchOn = false;
         var btn = document.getElementById('torch-btn');
         btn.style.display = 'none';
         btn.classList.remove('on');
-        // Make sure torch is off when stopping
         if (nativeStream) {
             var track = nativeStream.getVideoTracks()[0];
             if (track && track.applyConstraints) {
