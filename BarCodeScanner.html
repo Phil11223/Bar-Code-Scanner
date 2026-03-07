@@ -538,8 +538,10 @@
             video.srcObject = stream;
             video.play();
 
-            // ── Wait for real frames before starting loop ─────────────────────
-            // videoWidth is 0 until the hardware delivers the first real frame.
+            // ── Wait for real frames before declaring camera ready ────────────
+            // videoWidth is 0 until hardware delivers the first real frame.
+            // Once ready: show the viewfinder and wait — scan loop does NOT start.
+            // nativeScanFrame() is called only from onTap, never automatically.
             function waitForFrames() {
                 if (video.videoWidth > 0) {
                     video.style.opacity = '0.99';
@@ -549,9 +551,8 @@
                         if (isMobile) document.getElementById('torch-btn').style.display = 'flex';
                         document.getElementById('tap-hint').style.display = 'block';
                         updateScanLabel();
-                        setStatus('active', 'Scanning... point camera at barcode');
-                        dbg('Native engine live — entering rAF loop');
-                        nativeScanFrame();
+                        setStatus('active', 'Point camera at barcode, then tap to scan');
+                        dbg('Native camera ready — waiting for tap');
                     });
                 } else {
                     requestAnimationFrame(waitForFrames);
@@ -568,37 +569,35 @@
     }
 
     // ── nativeScanFrame ───────────────────────────────────────────────────────
-    // One rAF iteration: detect barcodes directly from the live <video> element.
-    // BarcodeDetector.detect() is async — we chain the next rAF in .finally()
-    // so the loop is always advancing even if a detect() call is slow.
+    // Started ONLY from onTap — NEVER auto-started when camera opens.
+    // Runs rAF frames until a barcode is found, then stops.
+    // Next tap will restart it for the next scan.
     function nativeScanFrame() {
-        if (!scanning) return;
+        // Both guards must pass — camera active AND user has tapped
+        if (!scanning || !tapPending) return;
         var video = document.getElementById('camVideo');
-
-        // ── Tap gate ──────────────────────────────────────────────────────────
-        // Camera stream runs continuously so the viewfinder stays live,
-        // but we only call detect() after the user taps the viewport.
-        if (!tapPending) {
-            nativeLoop = requestAnimationFrame(nativeScanFrame);
-            return;
-        }
 
         if (video.readyState >= 2 && video.videoWidth > 0) {
             nativeDetector.detect(video).then(function(barcodes) {
-                if (!barcodes.length) return;
+                if (!barcodes.length) return;   // nothing this frame — .finally reschedules
                 var bc  = barcodes[0];
                 var now = Date.now();
-                if (!(bc.rawValue === lastCode && (now - lastTime) < COOLDOWN)) {
-                    tapPending = false;   // consumed — wait for next tap
-                    dbg('BD FOUND: ' + bc.rawValue + ' (' + bc.format + ')');
-                    lastCode = bc.rawValue; lastTime = now;
-                    commitScan(bc.rawValue, bc.format);
-                }
+                if (bc.rawValue === lastCode && (now - lastTime) < COOLDOWN) return;
+                // ── Barcode found — consume the tap and stop the loop ─────────
+                tapPending = false;
+                dbg('BD FOUND: ' + bc.rawValue + ' (' + bc.format + ')');
+                lastCode = bc.rawValue; lastTime = now;
+                commitScan(bc.rawValue, bc.format);
             }).catch(function(){}).finally(function() {
-                if (scanning) nativeLoop = requestAnimationFrame(nativeScanFrame);
+                // Only keep looping if the tap is still active (no result yet)
+                if (scanning && tapPending) {
+                    nativeLoop = requestAnimationFrame(nativeScanFrame);
+                }
             });
         } else {
-            if (scanning) nativeLoop = requestAnimationFrame(nativeScanFrame);
+            if (scanning && tapPending) {
+                nativeLoop = requestAnimationFrame(nativeScanFrame);
+            }
         }
     }
 
@@ -906,8 +905,16 @@
             ripple.classList.add('burst');
 
             // ── Unlock one scan ───────────────────────────────────────────────
+            // Set the gate, then explicitly kick off the native loop if on mobile.
+            // ZXing (desktop) already has its own internal loop — the gate alone
+            // is enough to let the next callback through.
             tapPending = true;
             setStatus('active', 'Scanning...');
+            if (useNative) {
+                // Cancel any previous loop handle before starting fresh
+                if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
+                nativeScanFrame();
+            }
         }
         container.addEventListener('click',    onTap);
         container.addEventListener('touchend', onTap, { passive: true });
