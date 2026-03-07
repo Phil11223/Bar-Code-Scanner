@@ -70,11 +70,11 @@
         .menu-item:hover { background: #0f3460; color: #eee; }
 
         /* Toggle switch inside menu */
+        /* Pure div toggle — no <input>, no browser form-state restoration */
         .toggle-switch {
             position: relative; width: 36px; height: 20px;
             flex-shrink: 0; margin-left: auto;
         }
-        .toggle-switch input { display: none; }
         .toggle-track {
             position: absolute; inset: 0;
             background: #333; border-radius: 20px;
@@ -86,8 +86,9 @@
             background: #888; top: 3px; left: 3px;
             transition: all 0.2s;
         }
-        .toggle-switch input:checked + .toggle-track { background: #4cc9f0; }
-        .toggle-switch input:checked + .toggle-track::after {
+        /* .on class applied by JS — never touched by browser cache */
+        .toggle-switch.on .toggle-track { background: #4cc9f0; }
+        .toggle-switch.on .toggle-track::after {
             background: #1a1a2e; left: 19px;
         }
 
@@ -348,13 +349,12 @@
             <span></span><span></span><span></span>
         </div>
         <div id="menu-dropdown">
-            <label class="menu-item" onclick="toggleMultiScan()">
+            <div class="menu-item" onclick="toggleMultiScan()">
                 <span>&#9635; Multi-Scan</span>
-                <div class="toggle-switch">
-                    <input type="checkbox" id="multiScanCheck" autocomplete="off" />
+                <div class="toggle-switch" id="multiScanToggle">
                     <div class="toggle-track"></div>
                 </div>
-            </label>
+            </div>
         </div>
     </div>
     <div style="width:32px;height:32px;background:#4cc9f0;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:900;color:#1a1a2e;font-size:1rem;">T</div>
@@ -455,10 +455,7 @@
     var tapPending = false;
 
     document.addEventListener('DOMContentLoaded', function() {
-        // Force toggle off on every load — multi-scan never persists between sessions
-        document.getElementById('multiScanCheck').checked = false;
-        multiScan = false;
-
+        // multiScan starts false — div toggle has no browser-restorable state
         renameInputEl = document.getElementById('rename-input');
 
         var container = document.getElementById('scanner-container');
@@ -512,18 +509,13 @@
     }
 
     function toggleMultiScan() {
-        // The label wraps the toggle, so the checkbox flips automatically.
-        // We read its value on the next tick after the DOM updates.
-        setTimeout(function() {
-            multiScan = document.getElementById('multiScanCheck').checked;
-            if (!multiScan) {
-                // Leaving multi-scan: clear any pending rescan state
-                clearRescanTarget();
-            }
-            renderTableHead();
-            renderTable();
-            updateScanLabel();
-        }, 0);
+        multiScan = !multiScan;
+        var tog = document.getElementById('multiScanToggle');
+        if (multiScan) { tog.classList.add('on'); }
+        else           { tog.classList.remove('on'); clearRescanTarget(); }
+        renderTableHead();
+        renderTable();
+        updateScanLabel();
     }
 
     // ── Persist ───────────────────────────────────────────────────────────────
