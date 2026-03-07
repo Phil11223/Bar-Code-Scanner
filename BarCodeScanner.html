@@ -936,21 +936,19 @@
             // ── Normal new-record mode ───────────────────────────────────────
             addRecord(code, format);
 
-            // Auto-chain in multi-scan: after the primary (value) scan, immediately
-            // queue up the item column on the same row AND arm tapPending so the
-            // scanner fires as soon as a barcode is in frame — no second tap needed.
+            // Multi-scan chain: after saving the first column (value), set up
+            // rescanTarget pointing to the item column on this same row.
+            // Do NOT auto-arm tapPending — the barcode from scan 1 is still in
+            // frame and would instantly fill item with the same value.
+            // User must tap explicitly to trigger the second scan.
             if (multiScan) {
                 var newIdx = records.length - 1;
                 rescanTarget = { rowIdx: newIdx, col: 'item' };
                 document.getElementById('scanner-container').classList.add('rescan-mode');
-                document.getElementById('tap-hint').textContent = 'SCANNING ITEM...';
+                document.getElementById('tap-hint').textContent = 'TAP TO SCAN';
                 document.getElementById('rescan-prompt').style.display = 'block';
-                lastCode = ''; lastTime = 0;   // clear cooldown for item scan
-                if (useNative) {
-                    tapPending = true;   // native rAF loop picks this up
-                } else {
-                    zxArmTap();          // desktop: start decode loop immediately
-                }
+                tapPending = false;          // explicitly disarmed — wait for tap
+                lastCode = ''; lastTime = 0; // reset cooldown ready for next scan
                 renderTable();
                 updateScanLabel();
             }
