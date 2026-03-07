@@ -436,9 +436,14 @@
     var renameInputEl = null;
 
     // ── Engine selection ──────────────────────────────────────────────────────
-    // BarcodeDetector = Android Chrome 83+ (confirmed scanning)
+    // BarcodeDetector = Android/mobile Chrome 83+ (confirmed scanning)
     // ZXing           = desktop Chrome / Firefox / Safari (confirmed scanning)
-    var useNative = (typeof BarcodeDetector !== 'undefined');
+    //
+    // BarcodeDetector also exists in desktop Chrome 88+ so we MUST check for
+    // a mobile device too — otherwise the tap-gated native path runs on laptops.
+    var isMobile  = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    var useNative = isMobile && (typeof BarcodeDetector !== 'undefined');
+    console.log('Engine:', useNative ? 'BarcodeDetector (native)' : 'ZXing', '| mobile:', isMobile);
 
     var nativeDetector = null;
     var nativeStream   = null;
@@ -455,7 +460,7 @@
         var container = document.getElementById('scanner-container');
         function onTap(e) {
             if (!scanning) return;
-            tapPending = true;
+
             // Ripple at tap point
             var rect   = container.getBoundingClientRect();
             var cx     = (e.changedTouches ? e.changedTouches[0].clientX : e.clientX) - rect.left;
@@ -466,6 +471,23 @@
             ripple.classList.remove('burst');
             void ripple.offsetWidth;
             ripple.classList.add('burst');
+
+            // Reset cooldown so an intentional tap always works
+            lastCode = ''; lastTime = 0;
+
+            // ── Engine-specific tap handling ──────────────────────────────────
+            // Native (mobile): set tapPending flag — the rAF loop picks it up
+            // ZXing (desktop):  call zxTapDecode() directly — grabs the current
+            //                   frame and asks ZXing to decode it on demand,
+            //                   bypassing ZXing's internal callback throttling
+            // Mobile (native): set flag — the rAF scan loop checks it
+            // Desktop (ZXing):  start a per-tap rAF decode loop via zxArmTap()
+            lastCode = ''; lastTime = 0;   // always clear cooldown on explicit tap
+            if (useNative) {
+                tapPending = true;
+            } else {
+                zxArmTap();
+            }
         }
         container.addEventListener('click',    onTap);
         container.addEventListener('touchend', onTap, { passive: true });
@@ -589,22 +611,42 @@
     // updates the top-left overlay on the video. Called wherever state changes.
     function updateScanLabel() {
         var el = document.getElementById('scan-label');
-        if (!scanning) { el.style.display = 'none'; return; }
+        // Scan label only shown on mobile (native path) — desktop is continuous
+        if (!scanning || !useNative) { el.style.display = 'none'; return; }
 
         // Which column are we about to scan?
-        // rescanTarget tells us if we are mid-row (overwrite or item chain).
-        // Otherwise we are scanning the primary column (value) for a new row.
         var col = (rescanTarget !== null) ? rescanTarget.col : 'value';
         el.textContent = 'Scan ' + colNames[col];
         el.style.display = 'block';
     }
 
     // ── Start ─────────────────────────────────────────────────────────────────
+    // On mobile, BarcodeDetector's supported formats vary wildly by device.
+    // We ask the device what it actually supports before committing to native.
+    // If code_128 isn't in the real supported list, we fall back to ZXing
+    // which always supports it in software.
     function startScanner() {
         setStatus('loading', 'Starting camera...');
         document.getElementById('startBtn').style.display = 'none';
         document.getElementById('stopBtn').style.display  = '';
-        if (useNative) { startNative(); } else { startZXing(); }
+
+        if (!useNative) { startZXing(); return; }
+
+        // Ask the device which formats are genuinely supported
+        BarcodeDetector.getSupportedFormats().then(function(supported) {
+            var needsCode128 = supported.indexOf('code_128') !== -1;
+            if (!needsCode128) {
+                // Device BarcodeDetector can't do Code 128 — fall back to ZXing
+                console.log('BarcodeDetector missing code_128 — falling back to ZXing');
+                useNative = false;
+                startZXing();
+            } else {
+                startNative();
+            }
+        }).catch(function() {
+            // getSupportedFormats failed — just try native and see
+            startNative();
+        });
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -653,9 +695,11 @@
         if (video.readyState >= 2 && video.videoWidth > 0) {
             nativeDetector.detect(video).then(function(barcodes) {
                 if (barcodes.length > 0 && tapPending) {
-                    tapPending = false;
                     var bc = barcodes[0]; var now = Date.now();
+                    // Only consume tap AFTER cooldown passes — prevents the guard
+                    // silently eating the tap with no visible result
                     if (!(bc.rawValue === lastCode && (now - lastTime) < COOLDOWN)) {
+                        tapPending = false;
                         lastCode = bc.rawValue; lastTime = now;
                         commitScan(bc.rawValue, bc.format);
                     }
@@ -676,20 +720,37 @@
 
     // ══════════════════════════════════════════════════════════════════════════
     // DESKTOP — ZXing (Chrome, Firefox, Safari)
+    //
+    // Architecture:
+    //   getUserMedia → video element (display only, no ZXing stream ownership)
+    //   On tap: rAF loop draws video frames to a canvas, calls decodeFromCanvas
+    //           which is SYNCHRONOUS in ZXing — it either returns a Result or
+    //           throws NotFoundException. We catch the throw and retry next frame.
+    //
+    // Why not decodeFromVideoDevice callback? ZXing deduplicates internally —
+    // the same barcode held in frame never re-fires the callback after the first
+    // decode, making click-to-scan impossible to implement reliably.
     // ══════════════════════════════════════════════════════════════════════════
+    var zxStream    = null;   // MediaStream we own for the video element
+    var zxCanvas    = null;   // hidden canvas, reused every tap
+    var zxScanLoop  = null;   // rAF handle for the per-tap decode loop
+
     function startZXing() {
         zxReader = new ZXing.BrowserMultiFormatReader();
-        zxReader.decodeFromVideoDevice(null, 'camVideo', function(result, err) {
-            if (!result || !tapPending) return;
-            tapPending = false;
-            var code = result.getText();
-            var fmt  = result.getBarcodeFormat();
-            var now  = Date.now();
-            if (!code || code.length < 3) return;
-            if (code === lastCode && (now - lastTime) < COOLDOWN) return;
-            lastCode = code; lastTime = now;
-            var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
-            commitScan(code, fmtName);
+
+        // Hidden canvas — one per session, lives until stopZXing
+        zxCanvas = document.createElement('canvas');
+        zxCanvas.style.display = 'none';
+        document.body.appendChild(zxCanvas);
+
+        navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: { width: { ideal: 1280 }, height: { ideal: 720 } }
+        }).then(function(stream) {
+            zxStream = stream;
+            var video = document.getElementById('camVideo');
+            video.srcObject = stream;
+            return video.play();
         }).then(function() {
             scanning = true;
             setStatus('active', 'Tap viewport to scan');
@@ -697,14 +758,66 @@
             updateScanLabel();
         }).catch(function(err) {
             setStatus('error', 'Camera error: ' + err.message);
-            console.error('ZXing error:', err);
+            console.error('ZXing stream error:', err);
             document.getElementById('startBtn').style.display = '';
             document.getElementById('stopBtn').style.display  = 'none';
         });
     }
 
+    // ── zxDoScan: single rAF tick ─────────────────────────────────────────────
+    // Draws the current video frame to canvas and calls decodeFromCanvas, which
+    // is synchronous. On success → commit. On NotFoundException → retry next
+    // frame. tapPending going false (stop/cancel) exits the loop cleanly.
+    function zxDoScan() {
+        if (!tapPending || !scanning) return;   // tap cancelled or scanner stopped
+
+        var video = document.getElementById('camVideo');
+        if (!video || video.videoWidth === 0 || video.readyState < 2) {
+            zxScanLoop = requestAnimationFrame(zxDoScan);
+            return;
+        }
+
+        // Stamp current frame onto canvas
+        zxCanvas.width  = video.videoWidth;
+        zxCanvas.height = video.videoHeight;
+        zxCanvas.getContext('2d').drawImage(video, 0, 0);
+
+        try {
+            // decodeFromCanvas is SYNCHRONOUS — returns Result or throws
+            var result  = zxReader.decodeFromCanvas(zxCanvas);
+            var code    = result.getText();
+            var fmt     = result.getBarcodeFormat();
+            var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
+
+            if (code && code.length >= 3) {
+                tapPending  = false;          // consume tap
+                lastCode = code; lastTime = Date.now();
+                commitScan(code, fmtName);
+                return;                       // loop ends — tap consumed
+            }
+        } catch (e) {
+            // NotFoundException (or similar) — nothing in this frame, retry
+        }
+
+        zxScanLoop = requestAnimationFrame(zxDoScan);   // keep scanning
+    }
+
+    // ── zxArmTap: called by onTap (and auto-chain) ────────────────────────────
+    // Starts the per-tap rAF decode loop. Cancels any in-flight previous loop.
+    function zxArmTap() {
+        if (zxScanLoop) { cancelAnimationFrame(zxScanLoop); zxScanLoop = null; }
+        tapPending = true;
+        zxDoScan();
+    }
+
     function stopZXing() {
-        if (zxReader) { zxReader.reset(); zxReader = null; }
+        tapPending = false;
+        if (zxScanLoop)  { cancelAnimationFrame(zxScanLoop); zxScanLoop = null; }
+        if (zxStream)    { zxStream.getTracks().forEach(function(t){t.stop()}); zxStream = null; }
+        if (zxCanvas)    { zxCanvas.remove(); zxCanvas = null; }
+        var video = document.getElementById('camVideo');
+        if (video) video.srcObject = null;
+        zxReader = null;
     }
 
     // ── Stop ──────────────────────────────────────────────────────────────────
@@ -754,15 +867,21 @@
             addRecord(code, format);
 
             // Auto-chain in multi-scan: after the primary (value) scan, immediately
-            // queue up scanning the item column on the same new row.
-            // The scanner stays in amber/rescan-mode; user just taps again.
+            // queue up the item column on the same row AND arm tapPending so the
+            // scanner fires as soon as a barcode is in frame — no second tap needed.
             if (multiScan) {
                 var newIdx = records.length - 1;
                 rescanTarget = { rowIdx: newIdx, col: 'item' };
                 document.getElementById('scanner-container').classList.add('rescan-mode');
-                document.getElementById('tap-hint').textContent = 'TAP TO RESCAN';
+                document.getElementById('tap-hint').textContent = 'SCANNING ITEM...';
                 document.getElementById('rescan-prompt').style.display = 'block';
-                renderTable();   // highlight the new item cell
+                lastCode = ''; lastTime = 0;   // clear cooldown for item scan
+                if (useNative) {
+                    tapPending = true;   // native rAF loop picks this up
+                } else {
+                    zxArmTap();          // desktop: start decode loop immediately
+                }
+                renderTable();
                 updateScanLabel();
             }
         }
@@ -894,4 +1013,3 @@
 </script>
 </body>
 </html>
-
