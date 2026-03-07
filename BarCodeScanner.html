@@ -362,7 +362,7 @@
 </header>
 
 <!-- ── Additional-scan prompt (shown above scanner in rescan/multi mode) ─── -->
-<div id="rescan-prompt">&#128269; Now Scan Additional Barcode / Serial / MAC Address</div>
+<div id="rescan-prompt"></div>
 
 <!-- ── Camera card ────────────────────────────────────────────────────────── -->
 <div class="card" id="cameraCard">
@@ -578,6 +578,7 @@
 
         // Show the "Now Scan Additional" prompt when overwriting the item column
         if (col === 'item') {
+            document.getElementById('rescan-prompt').textContent = '🔍 Scan ' + colNames.item;
             document.getElementById('rescan-prompt').style.display = 'block';
         } else {
             document.getElementById('rescan-prompt').style.display = 'none';
@@ -946,6 +947,7 @@
                 rescanTarget = { rowIdx: newIdx, col: 'item' };
                 document.getElementById('scanner-container').classList.add('rescan-mode');
                 document.getElementById('tap-hint').textContent = 'TAP TO SCAN';
+                document.getElementById('rescan-prompt').textContent = '🔍 Scan ' + colNames.item;
                 document.getElementById('rescan-prompt').style.display = 'block';
                 tapPending = false;          // explicitly disarmed — wait for tap
                 // Do NOT reset lastCode here — keeping it means the just-scanned
