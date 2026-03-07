@@ -637,13 +637,19 @@
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // MOBILE — Native BarcodeDetector (Android Chrome 83+)
+    // MOBILE — Dual engine: BarcodeDetector (rAF) + ZXing (stream callback)
+    //
+    // Both engines share the same getUserMedia stream. Whichever detects a
+    // barcode first calls commitScan and sets tapPending=false, which silences
+    // the other. This covers barcodes the device chipset can't handle natively
+    // (BarcodeDetector) — ZXing provides pure-software fallback for those.
     // ══════════════════════════════════════════════════════════════════════════
+    var zxMobileReader = null;  // second ZXing instance, mobile-only
+
     function startNative(formats) {
-        // If formats is null or empty, omit the formats option entirely —
-        // BarcodeDetector then defaults to detecting everything it supports
         var opts = (formats && formats.length) ? { formats: formats } : {};
         nativeDetector = new BarcodeDetector(opts);
+
         navigator.mediaDevices.getUserMedia({
             audio: false,
             video: { facingMode: { ideal: 'environment' }, width: { ideal:1280 }, height: { ideal:720 } }
@@ -652,7 +658,8 @@
             var video = document.getElementById('camVideo');
             video.srcObject = stream;
             video.play();
-            // Poll until videoWidth > 0 (GPU has real frames), then force compositor flush
+
+            // Poll until GPU has real frames, then start both engines
             function waitForFrame() {
                 if (video.videoWidth > 0) {
                     video.style.opacity = '0.99';
@@ -662,7 +669,28 @@
                         setStatus('active', 'Tap viewport to scan');
                         document.getElementById('tap-hint').style.display = 'block';
                         updateScanLabel();
+
+                        // Engine 1: BarcodeDetector rAF loop (native, fast for QR/EAN)
                         nativeScanFrame();
+
+                        // Engine 2: ZXing decodeFromVideoDevice (software, handles
+                        // Code128 variants the device chipset may not support natively)
+                        zxMobileReader = new ZXing.BrowserMultiFormatReader();
+                        zxMobileReader.decodeFromVideoDevice(null, 'camVideo',
+                            function(result, err) {
+                                if (!result || !tapPending) return;
+                                var code = result.getText();
+                                var fmt  = result.getBarcodeFormat();
+                                var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
+                                if (!code || code.length < 3) return;
+                                if (code === lastCode && (Date.now() - lastTime) < COOLDOWN) return;
+                                tapPending = false;
+                                lastCode = code; lastTime = Date.now();
+                                commitScan(code, fmtName);
+                            }
+                        ).catch(function(e) {
+                            console.log('ZXing mobile fallback error:', e);
+                        });
                     });
                 } else {
                     requestAnimationFrame(waitForFrame);
@@ -684,8 +712,6 @@
             nativeDetector.detect(video).then(function(barcodes) {
                 if (barcodes.length > 0 && tapPending) {
                     var bc = barcodes[0]; var now = Date.now();
-                    // Only consume tap AFTER cooldown passes — prevents the guard
-                    // silently eating the tap with no visible result
                     if (!(bc.rawValue === lastCode && (now - lastTime) < COOLDOWN)) {
                         tapPending = false;
                         lastCode = bc.rawValue; lastTime = now;
@@ -701,8 +727,9 @@
     }
 
     function stopNative() {
-        if (nativeLoop)   { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
-        if (nativeStream) { nativeStream.getTracks().forEach(function(t){t.stop();}); nativeStream = null; }
+        if (nativeLoop)      { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
+        if (zxMobileReader)  { zxMobileReader.reset(); zxMobileReader = null; }
+        if (nativeStream)    { nativeStream.getTracks().forEach(function(t){t.stop();}); nativeStream = null; }
         document.getElementById('camVideo').srcObject = null;
     }
 
