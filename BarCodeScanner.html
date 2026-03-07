@@ -190,7 +190,8 @@
             background: rgba(0,0,0,0.55); color: #4cc9f0;
             font-size: 0.75rem; font-weight: 700; letter-spacing: 1px;
             padding: 4px 14px; border-radius: 20px;
-            pointer-events: none; z-index: 15; display: none;
+            pointer-events: none; z-index: 25; display: none;
+            transition: opacity 0.3s ease;
         }
         #scanner-container.rescan-mode #tap-hint { color: #f4a261; }
 
@@ -481,7 +482,9 @@
     // useNative = true  → mobile path: BarcodeDetector rAF loop (OS-level chip)
     // useNative = false → desktop path: ZXing decodeFromVideoDevice (manages stream)
     var isMobile  = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-    var useNative = (typeof BarcodeDetector !== 'undefined');
+    // Only use BarcodeDetector on MOBILE — desktop Chrome exposes the API too
+    // but it's unreliable there; ZXing is the correct engine for desktop.
+    var useNative = isMobile && (typeof BarcodeDetector !== 'undefined');
     console.log('Device: ' + (isMobile ? 'mobile' : 'desktop') + ' | engine: ' + (useNative ? 'BarcodeDetector' : 'ZXing'));
 
     // ── Engine state ──────────────────────────────────────────────────────────
@@ -536,11 +539,9 @@
 
             // ── Wait for real frames before starting loop ─────────────────────
             // videoWidth is 0 until the hardware delivers the first real frame.
-            // GPU flush (translateZ trick) helps some Android devices render faster.
             function waitForFrames() {
                 if (video.videoWidth > 0) {
-                    video.style.transform = 'translateZ(0)';
-                    video.style.opacity   = '0.99';
+                    video.style.opacity = '0.99';
                     requestAnimationFrame(function() {
                         video.style.opacity = '1';
                         scanning = true;
