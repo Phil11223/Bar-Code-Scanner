@@ -133,7 +133,7 @@
         .scan-overlay {
             position: absolute; top: 50%; left: 50%;
             transform: translate(-50%, -50%);
-            width: 85%; height: 35%;
+            width: 92%; height: 38%;
             border: 2px solid #4cc9f0; border-radius: 6px;
             box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);
             z-index: 10; pointer-events: none;
@@ -450,32 +450,49 @@
     var nativeLoop     = null;
     var zxReader       = null;
 
-    // ── ZXing decode hints — shared by all reader instances ───────────────────
-    // TRY_HARDER: essential for ITF (Interleaved 2 of 5) — tells ZXing to
-    //             spend extra effort scanning each frame. Without it, ITF
-    //             barcodes with uniform narrow bars are often missed entirely.
-    // POSSIBLE_FORMATS: explicitly list every format we want. BrowserMultiFormatReader
-    //             may skip ITF without this even when TRY_HARDER is set.
-    var zxHints = (function() {
-        var hints = new Map();
-        hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-        hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-            ZXing.BarcodeFormat.ITF,
-            ZXing.BarcodeFormat.CODE_128,
-            ZXing.BarcodeFormat.CODE_39,
-            ZXing.BarcodeFormat.CODE_93,
-            ZXing.BarcodeFormat.CODABAR,
-            ZXing.BarcodeFormat.EAN_13,
-            ZXing.BarcodeFormat.EAN_8,
-            ZXing.BarcodeFormat.UPC_A,
-            ZXing.BarcodeFormat.UPC_E,
-            ZXing.BarcodeFormat.QR_CODE,
-            ZXing.BarcodeFormat.DATA_MATRIX,
-            ZXing.BarcodeFormat.PDF_417,
-            ZXing.BarcodeFormat.AZTEC
-        ]);
-        return hints;
+    // ── ZXing decode hints ───────────────────────────────────────────────────
+    // Two hint maps for a two-pass decode strategy:
+    //
+    //   Pass 1 — zxHintsPreferred (no EAN-8):
+    //     Tried first on every tap. EAN-8 is excluded because it only applies
+    //     to tiny retail items (lip balm etc) and false-positives on partial
+    //     slices of longer barcodes like Code 128 / ITF.
+    //
+    //   Pass 2 — zxHintsFallback (adds EAN-8):
+    //     Only tried if pass 1 finds nothing. Gives maximum compatibility
+    //     without sacrificing accuracy on the common case.
+    //
+    //   TRY_HARDER on both passes: essential for ITF (uniform narrow bars).
+    var PREFERRED_FORMATS = [
+        ZXing.BarcodeFormat.CODE_128,    // serial/inventory labels
+        ZXing.BarcodeFormat.ITF,         // 12-digit shipping/warehouse
+        ZXing.BarcodeFormat.CODE_39,
+        ZXing.BarcodeFormat.CODE_93,
+        ZXing.BarcodeFormat.CODABAR,
+        ZXing.BarcodeFormat.EAN_13,      // retail 13-digit
+        ZXing.BarcodeFormat.UPC_A,       // retail 12-digit
+        ZXing.BarcodeFormat.UPC_E,       // compressed UPC 8-digit
+        ZXing.BarcodeFormat.QR_CODE,
+        ZXing.BarcodeFormat.DATA_MATRIX,
+        ZXing.BarcodeFormat.PDF_417,
+        ZXing.BarcodeFormat.AZTEC
+    ];
+    var zxHintsPreferred = (function() {
+        var h = new Map();
+        h.set(ZXing.DecodeHintType.TRY_HARDER, true);
+        h.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, PREFERRED_FORMATS);
+        return h;
     })();
+    var zxHintsFallback = (function() {
+        var h = new Map();
+        h.set(ZXing.DecodeHintType.TRY_HARDER, true);
+        h.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,
+            PREFERRED_FORMATS.concat([ZXing.BarcodeFormat.EAN_8])
+        );
+        return h;
+    })();
+    // Convenience alias — readers that do one-shot decoding use preferred by default
+    var zxHints = zxHintsPreferred;
 
     // ── Tap-to-scan gate ──────────────────────────────────────────────────────
     // Scan loops run continuously but only commit when tapPending = true.
@@ -709,18 +726,46 @@
                         // EXIF orientation is handled correctly (no canvas needed).
                         function armZxMobile() {
                             if (!scanning || !tapPending) return;
-                            // Tear down any previous instance first
                             if (zxMobileReader) { zxMobileReader.reset(); zxMobileReader = null; }
 
-                            zxMobileReader = new ZXing.BrowserMultiFormatReader(zxHints);
-                            // Use decodeFromStream with the EXISTING nativeStream
-                            // (rear camera already open). decodeFromVideoDevice(null)
-                            // would open a NEW stream and pick the default/front camera.
+                            // Pass 1: preferred formats (no EAN-8)
+                            zxMobileReader = new ZXing.BrowserMultiFormatReader(zxHintsPreferred);
                             zxMobileReader.decodeFromStream(nativeStream, 'camVideo',
                                 function(result, err) {
-                                    if (!result) return;
                                     if (!tapPending) {
                                         if (zxMobileReader) { zxMobileReader.reset(); zxMobileReader = null; }
+                                        return;
+                                    }
+                                    if (result) {
+                                        // Preferred pass found something — commit it
+                                        var code = result.getText();
+                                        var fmt  = result.getBarcodeFormat();
+                                        var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
+                                        if (!code || code.length < 3) return;
+                                        if (code === lastCode && (Date.now() - lastTime) < COOLDOWN) return;
+                                        tapPending = false;
+                                        lastCode = code; lastTime = Date.now();
+                                        if (zxMobileReader) { zxMobileReader.reset(); zxMobileReader = null; }
+                                        commitScan(code, fmtName);
+                                    }
+                                    // No result from preferred pass — watchTap will spin up
+                                    // a fallback reader if tapPending is still true
+                                }
+                            ).catch(function(e) {
+                                console.log('ZXing preferred pass error:', e);
+                            });
+                        }
+
+                        function armZxMobileFallback() {
+                            if (!scanning || !tapPending) return;
+                            if (zxMobileReader) { zxMobileReader.reset(); zxMobileReader = null; }
+
+                            // Pass 2: fallback — adds EAN-8 for tiny retail items
+                            zxMobileReader = new ZXing.BrowserMultiFormatReader(zxHintsFallback);
+                            zxMobileReader.decodeFromStream(nativeStream, 'camVideo',
+                                function(result, err) {
+                                    if (!result || !tapPending) {
+                                        if (!tapPending && zxMobileReader) { zxMobileReader.reset(); zxMobileReader = null; }
                                         return;
                                     }
                                     var code = result.getText();
@@ -734,18 +779,33 @@
                                     commitScan(code, fmtName);
                                 }
                             ).catch(function(e) {
-                                console.log('ZXing mobile engine error:', e);
+                                console.log('ZXing fallback pass error:', e);
                             });
                         }
 
-                        // Watch tapPending — when it goes true (user taps), spin up a fresh reader
+                        // watchTap: polls tapPending every 80ms.
+                        // On tap: start preferred pass. After 1.5s if still pending,
+                        // switch to fallback pass (adds EAN-8) for maximum compatibility.
+                        var tapStartTime = 0;
+                        var onFallback   = false;
                         function watchTap() {
                             if (!scanning) return;
-                            if (tapPending && !zxMobileReader) {
-                                armZxMobile();
+                            if (tapPending) {
+                                if (!zxMobileReader) {
+                                    // Fresh tap — start preferred pass
+                                    tapStartTime = Date.now();
+                                    onFallback   = false;
+                                    armZxMobile();
+                                } else if (!onFallback && (Date.now() - tapStartTime) > 1500) {
+                                    // Preferred pass has been running 1.5s with no result
+                                    // Switch to fallback which includes EAN-8
+                                    onFallback = true;
+                                    armZxMobileFallback();
+                                }
                             } else if (!tapPending && zxMobileReader) {
-                                // Tap was consumed — tear down reader until next tap
+                                // Tap consumed — tear down
                                 zxMobileReader.reset(); zxMobileReader = null;
+                                onFallback = false;
                             }
                             setTimeout(watchTap, 80);
                         }
@@ -830,7 +890,7 @@
     var zxScanLoop  = null;   // rAF handle, desktop canvas path
 
     function startZXing() {
-        zxReader = new ZXing.BrowserMultiFormatReader(zxHints);
+        zxReader = new ZXing.BrowserMultiFormatReader(zxHintsPreferred);
 
         if (isMobile) {
             // ── Mobile ZXing path ─────────────────────────────────────────────
@@ -927,13 +987,20 @@
         zxCanvas.getContext('2d').drawImage(video, 0, 0);
 
         try {
-            var result  = zxReader.decodeFromCanvas(zxCanvas);
+            // Pass 1: preferred formats (no EAN-8) — avoids false positives
+            var result = null;
+            try { result = zxReader.decodeFromCanvas(zxCanvas); } catch(e1) {
+                // Pass 2: fallback includes EAN-8 for genuine tiny-item barcodes
+                try {
+                    var fbReader = new ZXing.BrowserMultiFormatReader(zxHintsFallback);
+                    result = fbReader.decodeFromCanvas(zxCanvas);
+                } catch(e2) { /* nothing found in either pass */ }
+            }
+            if (!result) throw new Error('not found');
             var code    = result.getText();
             var fmt     = result.getBarcodeFormat();
             var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
             var now     = Date.now();
-            // Cooldown check — same code that was just scanned must not
-            // re-commit immediately (e.g. still in frame after first scan)
             if (code && code.length >= 3 &&
                 !(code === lastCode && (now - lastTime) < COOLDOWN)) {
                 tapPending = false;
