@@ -617,11 +617,24 @@
                 scanCanvas.height = vid.videoHeight;
                 scanCanvas.getContext('2d').drawImage(vid, 0, 0);
 
-                var zxErr1 = null, zxErr2 = null;
+                // ── ZXing 0.21.3 correct canvas decode ───────────────────────
+                // decodeFromImageElement() checks el.complete — an HTMLImageElement
+                // property. Canvas has no .complete so ZXing receives undefined → crash.
+                // Fix: construct BinaryBitmap directly from the canvas luminance source.
+                // This is the same path ZXing uses internally, minus the .complete guard.
                 var result = null;
-                try { result = zxPref.decodeFromImageElement(scanCanvas); } catch(e) { zxErr1 = e.message || String(e); }
+                var zxErr1 = null, zxErr2 = null;
+                try {
+                    var lum1    = new ZXing.HTMLCanvasElementLuminanceSource(scanCanvas);
+                    var bitmap1 = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum1));
+                    result = zxPref.decode(bitmap1);
+                } catch(e) { zxErr1 = e.message || String(e); }
                 if (!result) {
-                    try { result = zxFb.decodeFromImageElement(scanCanvas); } catch(e) { zxErr2 = e.message || String(e); }
+                    try {
+                        var lum2    = new ZXing.HTMLCanvasElementLuminanceSource(scanCanvas);
+                        var bitmap2 = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum2));
+                        result = zxFb.decode(bitmap2);
+                    } catch(e) { zxErr2 = e.message || String(e); }
                 }
                 if (!result) {
                     dbg('ZXing no result: ' + (zxErr1||'') + ' | ' + (zxErr2||''));
