@@ -144,14 +144,21 @@
             box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);
         }
         .scan-line {
-            position: absolute; width: 100%; height: 2px;
+            position: absolute; left: 0; right: 0; top: 0; height: 2px;
             background: linear-gradient(90deg, transparent, #4cc9f0, transparent);
-            animation: scanLine 1.5s ease-in-out infinite; top: 0;
+            /* translateY animates on the GPU compositor — no layout reflow, always smooth.
+               alternate bounces the line back up instead of snapping to start.
+               will-change promotes to its own layer, preventing paint invalidation. */
+            will-change: transform;
+            animation: scanLine 1.8s ease-in-out infinite alternate;
         }
         #scanner-container.rescan-mode .scan-line {
             background: linear-gradient(90deg, transparent, #f4a261, transparent);
         }
-        @keyframes scanLine { 0%{top:0} 100%{top:100%} }
+        @keyframes scanLine {
+            0%   { transform: translateY(0); }
+            100% { transform: translateY(calc(var(--overlay-h, 120px) - 2px)); }
+        }
 
         #scan-flash {
             position: absolute; inset: 0;
@@ -724,92 +731,83 @@
                         // it decodes whatever is in frame immediately, no throttling.
                         // decodeFromVideoDevice reads the live stream so Android's
                         // EXIF orientation is handled correctly (no canvas needed).
-                        function armZxMobile() {
-                            if (!scanning || !tapPending) return;
-                            if (zxMobileReader) { zxMobileReader.reset(); zxMobileReader = null; }
+                        // ── ZXing mobile: orientation-aware canvas rAF loop ────────────
+                        // WHY canvas instead of decodeFromStream:
+                        //   decodeFromStream gives ZXing its own internal video element.
+                        //   That element has no EXIF correction → portrait-mode phones
+                        //   deliver sideways pixels → wrong Code128 sub-table → garbage.
+                        //   By capturing to our own canvas and rotating by
+                        //   screen.orientation.angle we guarantee correctly-oriented
+                        //   pixels every time, regardless of how the phone is held.
+                        //
+                        // TWO-PASS per frame:
+                        //   Pass 1 (preferred, no EAN-8) — tried first every frame
+                        //   Pass 2 (fallback, adds EAN-8) — only if pass 1 misses
+                        //   This prevents EAN-8 false-positives on Code128/ITF barcodes
+                        //   while keeping EAN-8 available for genuine tiny retail items.
 
-                            // Pass 1: preferred formats (no EAN-8)
-                            zxMobileReader = new ZXing.BrowserMultiFormatReader(zxHintsPreferred);
-                            zxMobileReader.decodeFromStream(nativeStream, 'camVideo',
-                                function(result, err) {
-                                    if (!tapPending) {
-                                        if (zxMobileReader) { zxMobileReader.reset(); zxMobileReader = null; }
-                                        return;
-                                    }
-                                    if (result) {
-                                        // Preferred pass found something — commit it
-                                        var code = result.getText();
-                                        var fmt  = result.getBarcodeFormat();
-                                        var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
-                                        if (!code || code.length < 3) return;
-                                        if (code === lastCode && (Date.now() - lastTime) < COOLDOWN) return;
-                                        tapPending = false;
-                                        lastCode = code; lastTime = Date.now();
-                                        if (zxMobileReader) { zxMobileReader.reset(); zxMobileReader = null; }
-                                        commitScan(code, fmtName);
-                                    }
-                                    // No result from preferred pass — watchTap will spin up
-                                    // a fallback reader if tapPending is still true
-                                }
-                            ).catch(function(e) {
-                                console.log('ZXing preferred pass error:', e);
-                            });
-                        }
+                        var zxMobileCanvas = document.createElement('canvas');
+                        zxMobileCanvas.style.display = 'none';
+                        document.body.appendChild(zxMobileCanvas);
 
-                        function armZxMobileFallback() {
-                            if (!scanning || !tapPending) return;
-                            if (zxMobileReader) { zxMobileReader.reset(); zxMobileReader = null; }
+                        // Readers are created once — canvas decode is synchronous so
+                        // there is no internal stream state to cause deduplication.
+                        var zxMobilePref = new ZXing.BrowserMultiFormatReader(zxHintsPreferred);
+                        var zxMobileFb   = new ZXing.BrowserMultiFormatReader(zxHintsFallback);
 
-                            // Pass 2: fallback — adds EAN-8 for tiny retail items
-                            zxMobileReader = new ZXing.BrowserMultiFormatReader(zxHintsFallback);
-                            zxMobileReader.decodeFromStream(nativeStream, 'camVideo',
-                                function(result, err) {
-                                    if (!result || !tapPending) {
-                                        if (!tapPending && zxMobileReader) { zxMobileReader.reset(); zxMobileReader = null; }
-                                        return;
-                                    }
-                                    var code = result.getText();
-                                    var fmt  = result.getBarcodeFormat();
-                                    var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
-                                    if (!code || code.length < 3) return;
-                                    if (code === lastCode && (Date.now() - lastTime) < COOLDOWN) return;
+                        function zxMobileTick() {
+                            if (!scanning) { zxMobileCanvas.remove(); return; }
+                            if (!tapPending) { requestAnimationFrame(zxMobileTick); return; }
+
+                            var vid = document.getElementById('camVideo');
+                            if (!vid || vid.videoWidth === 0 || vid.readyState < 2) {
+                                requestAnimationFrame(zxMobileTick); return;
+                            }
+
+                            // Determine rotation from screen orientation API.
+                            // angle=0   → landscape or no rotation (draw straight)
+                            // angle=90  → phone held portrait, sensor rotated 90°
+                            // angle=270 → phone held portrait, sensor rotated 270°
+                            var angle = (window.screen && window.screen.orientation)
+                                        ? (window.screen.orientation.angle || 0)
+                                        : 0;
+                            var w = vid.videoWidth, h = vid.videoHeight;
+                            var rotated = (angle === 90 || angle === 270);
+                            zxMobileCanvas.width  = rotated ? h : w;
+                            zxMobileCanvas.height = rotated ? w : h;
+
+                            var ctx = zxMobileCanvas.getContext('2d');
+                            ctx.save();
+                            ctx.translate(zxMobileCanvas.width / 2, zxMobileCanvas.height / 2);
+                            ctx.rotate(angle * Math.PI / 180);
+                            ctx.drawImage(vid, -w / 2, -h / 2, w, h);
+                            ctx.restore();
+
+                            var result = null;
+                            // Pass 1: no EAN-8 — avoids false positives on longer barcodes
+                            try { result = zxMobilePref.decodeFromCanvas(zxMobileCanvas); }
+                            catch(e1) {
+                                // Pass 2: adds EAN-8 for genuine tiny retail items
+                                try { result = zxMobileFb.decodeFromCanvas(zxMobileCanvas); }
+                                catch(e2) { /* nothing found this frame */ }
+                            }
+
+                            if (result) {
+                                var code    = result.getText();
+                                var fmt     = result.getBarcodeFormat();
+                                var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
+                                if (code && code.length >= 3 &&
+                                    !(code === lastCode && (Date.now() - lastTime) < COOLDOWN)) {
                                     tapPending = false;
                                     lastCode = code; lastTime = Date.now();
-                                    if (zxMobileReader) { zxMobileReader.reset(); zxMobileReader = null; }
                                     commitScan(code, fmtName);
+                                    requestAnimationFrame(zxMobileTick);
+                                    return;
                                 }
-                            ).catch(function(e) {
-                                console.log('ZXing fallback pass error:', e);
-                            });
-                        }
-
-                        // watchTap: polls tapPending every 80ms.
-                        // On tap: start preferred pass. After 1.5s if still pending,
-                        // switch to fallback pass (adds EAN-8) for maximum compatibility.
-                        var tapStartTime = 0;
-                        var onFallback   = false;
-                        function watchTap() {
-                            if (!scanning) return;
-                            if (tapPending) {
-                                if (!zxMobileReader) {
-                                    // Fresh tap — start preferred pass
-                                    tapStartTime = Date.now();
-                                    onFallback   = false;
-                                    armZxMobile();
-                                } else if (!onFallback && (Date.now() - tapStartTime) > 1500) {
-                                    // Preferred pass has been running 1.5s with no result
-                                    // Switch to fallback which includes EAN-8
-                                    onFallback = true;
-                                    armZxMobileFallback();
-                                }
-                            } else if (!tapPending && zxMobileReader) {
-                                // Tap consumed — tear down
-                                zxMobileReader.reset(); zxMobileReader = null;
-                                onFallback = false;
                             }
-                            setTimeout(watchTap, 80);
+                            requestAnimationFrame(zxMobileTick);
                         }
-                        watchTap();
+                        zxMobileTick();
                     });
                 } else {
                     requestAnimationFrame(waitForFrame);
@@ -846,11 +844,9 @@
     }
 
     function stopNative() {
-        if (nativeLoop)     { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
-        if (zxMobileReader) { zxMobileReader.reset(); zxMobileReader = null; }
-        // watchTap() checks scanning flag — setting scanning=false (done in
-        // stopScanner before calling stopNative) causes it to exit naturally
-        if (nativeStream)   { nativeStream.getTracks().forEach(function(t){t.stop();}); nativeStream = null; }
+        if (nativeLoop)   { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
+        // zxMobileTick and zxMobileCanvas clean themselves up when scanning=false
+        if (nativeStream) { nativeStream.getTracks().forEach(function(t){t.stop();}); nativeStream = null; }
         document.getElementById('camVideo').srcObject = null;
     }
 
@@ -1132,6 +1128,21 @@
         document.getElementById('manualInput').addEventListener('keydown', function(e) {
             if (e.key === 'Enter') addManual();
         });
+
+        // Keep --overlay-h CSS variable in sync with the real scan-overlay height
+        // so the translateY animation endpoint is always exact regardless of screen size.
+        var overlay = document.querySelector('.scan-overlay');
+        function syncOverlayH() {
+            if (overlay) {
+                overlay.style.setProperty('--overlay-h', overlay.offsetHeight + 'px');
+            }
+        }
+        syncOverlayH();
+        if (window.ResizeObserver) {
+            new ResizeObserver(syncOverlayH).observe(overlay);
+        } else {
+            window.addEventListener('resize', syncOverlayH);
+        }
     });
     function deleteRecord(idx) { records.splice(idx,1); renderTable(); saveData(); }
     function clearAll() { if(!records.length) return; records=[]; clearRescanTarget(); renderTable(); saveData(); }
