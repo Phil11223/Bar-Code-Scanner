@@ -621,10 +621,14 @@
     }
 
     // ── Start ─────────────────────────────────────────────────────────────────
-    // On mobile, BarcodeDetector's supported formats vary wildly by device.
-    // We ask the device what it actually supports before committing to native.
-    // If code_128 isn't in the real supported list, we fall back to ZXing
-    // which always supports it in software.
+    // Mobile: always use BarcodeDetector — it handles camera orientation
+    // natively (OS-level). ZXing on mobile reads frames via canvas which loses
+    // Android EXIF rotation → garbled barcode output.
+    // We intersect our wanted formats with what the device actually supports
+    // so we never pass an unsupported format (which silently causes no detections).
+    // Desktop: always ZXing (canvas tap-decode path, confirmed working).
+    var WANTED_FORMATS = ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf'];
+
     function startScanner() {
         setStatus('loading', 'Starting camera...');
         document.getElementById('startBtn').style.display = 'none';
@@ -632,29 +636,27 @@
 
         if (!useNative) { startZXing(); return; }
 
-        // Ask the device which formats are genuinely supported
+        // Get the real supported list, intersect with wanted, then start.
+        // If getSupportedFormats fails, just pass all wanted and let the
+        // detector silently skip any unsupported ones.
         BarcodeDetector.getSupportedFormats().then(function(supported) {
-            var needsCode128 = supported.indexOf('code_128') !== -1;
-            if (!needsCode128) {
-                // Device BarcodeDetector can't do Code 128 — fall back to ZXing
-                console.log('BarcodeDetector missing code_128 — falling back to ZXing');
-                useNative = false;
-                startZXing();
-            } else {
-                startNative();
-            }
+            var active = WANTED_FORMATS.filter(function(f) {
+                return supported.indexOf(f) !== -1;
+            });
+            console.log('BarcodeDetector active formats:', active);
+            // Always use native on mobile — never fall back to ZXing
+            startNative(active.length ? active : WANTED_FORMATS);
         }).catch(function() {
-            // getSupportedFormats failed — just try native and see
-            startNative();
+            startNative(WANTED_FORMATS);
         });
     }
 
     // ══════════════════════════════════════════════════════════════════════════
     // MOBILE — Native BarcodeDetector (Android Chrome 83+)
     // ══════════════════════════════════════════════════════════════════════════
-    function startNative() {
+    function startNative(formats) {
         nativeDetector = new BarcodeDetector({
-            formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf']
+            formats: formats || WANTED_FORMATS
         });
         navigator.mediaDevices.getUserMedia({
             audio: false,
