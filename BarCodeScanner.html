@@ -407,7 +407,7 @@
         <span id="statusText">Camera not started</span>
     </div>
     <div class="btn-row">
-        <button id="startBtn" onclick="startScanner()">&#9654; Start Camera</button>
+        <button id="startBtn" onclick="dbg('Start button clicked'); startScanner()">&#9654; Start Camera</button>
         <button id="stopBtn"  onclick="stopScanner()">&#9209; Stop Camera</button>
     </div>
 </div>
@@ -504,10 +504,12 @@
     //   Every tap hits "if (!scanning) return" and exits. Nothing ever scans.
     //   Using our own setInterval + drawImage is simpler and actually works.
     function startScanner() {
+        dbg('startScanner() called');
         setStatus('loading', 'Starting camera...');
         document.getElementById('startBtn').style.display = 'none';
         document.getElementById('stopBtn').style.display  = '';
 
+        dbg('calling getUserMedia...');
         navigator.mediaDevices.getUserMedia({
             audio: false,
             video: {
@@ -720,14 +722,19 @@
     // ── Persist ───────────────────────────────────────────────────────────────
     function loadData() {
         try {
-            window.db.get('barcode_records').then(function(d) {
-                if (d && d.records)  { records  = d.records;  renderTable(); }
-                if (d && d.colNames) { colNames  = d.colNames; renderTableHead(); }
-            }).catch(function(){});
-        } catch(e) {}
+            var raw = localStorage.getItem('barcode_records');
+            if (raw) {
+                var d = JSON.parse(raw);
+                if (d.records)  { records  = d.records;  renderTable(); }
+                if (d.colNames) { colNames  = d.colNames; renderTableHead(); }
+            }
+        } catch(e) { dbg('loadData error: ' + e); }
     }
     function saveData() {
-        try { window.db.set('barcode_records', { records: records, colNames: colNames }); } catch(e) {}
+        try {
+            localStorage.setItem('barcode_records',
+                JSON.stringify({ records: records, colNames: colNames }));
+        } catch(e) { dbg('saveData error: ' + e); }
     }
 
     // ── Rename column popup ───────────────────────────────────────────────────
@@ -927,6 +934,7 @@
 
         renderTableHead();
         loadData();
+        dbg('DOM ready — page bootstrapped');
     });
     function deleteRecord(idx) { records.splice(idx,1); renderTable(); saveData(); }
     function clearAll() { if(!records.length) return; records=[]; clearRescanTarget(); renderTable(); saveData(); }
