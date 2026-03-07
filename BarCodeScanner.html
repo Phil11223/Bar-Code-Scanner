@@ -545,7 +545,7 @@
                         video.style.opacity = '1';
                         scanning = true;
                         if (isMobile) document.getElementById('torch-btn').style.display = 'flex';
-                        document.getElementById('tap-hint').style.display = 'none';
+                        document.getElementById('tap-hint').style.display = 'block';
                         updateScanLabel();
                         setStatus('active', 'Scanning... point camera at barcode');
                         dbg('Native engine live — entering rAF loop');
@@ -603,18 +603,10 @@
     // element. It fires the callback on every successful decode — no canvas loop
     // or setInterval needed. We just handle results in the callback.
     function startZXing() {
-        var hints = new Map();
-        hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-        hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-            ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.ITF,
-            ZXing.BarcodeFormat.CODE_39,  ZXing.BarcodeFormat.CODE_93,
-            ZXing.BarcodeFormat.CODABAR,  ZXing.BarcodeFormat.EAN_13,
-            ZXing.BarcodeFormat.EAN_8,    ZXing.BarcodeFormat.UPC_A,
-            ZXing.BarcodeFormat.UPC_E,    ZXing.BarcodeFormat.QR_CODE,
-            ZXing.BarcodeFormat.DATA_MATRIX, ZXing.BarcodeFormat.PDF_417,
-            ZXing.BarcodeFormat.AZTEC
-        ]);
-        zxReader = new ZXing.BrowserMultiFormatReader(hints);
+        // No hints map — plain constructor scans all formats by default.
+        // Passing a hints Map with TRY_HARDER can actually slow down or break
+        // decoding on some browsers; simpler is more reliable here.
+        zxReader = new ZXing.BrowserMultiFormatReader();
 
         // decodeFromVideoDevice: null deviceId = default camera
         // Returns a Promise that resolves when scanning STARTS (not when it stops).
@@ -631,7 +623,7 @@
             commitScan(code, fmtName);
         }).then(function() {
             scanning = true;
-            document.getElementById('tap-hint').style.display = 'none';
+            document.getElementById('tap-hint').style.display = 'block';
             updateScanLabel();
             setStatus('active', 'Scanning... point camera at barcode');
             dbg('ZXing engine live');
