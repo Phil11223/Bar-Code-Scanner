@@ -528,17 +528,12 @@
             window.db.get('barcode_records').then(function(d) {
                 if (d && d.records)   { records  = d.records;   renderTable(); }
                 if (d && d.colNames)  { colNames  = d.colNames;  renderTableHead(); }
-                if (d && d.multiScan) {
-                    multiScan = d.multiScan;
-                    document.getElementById('multiScanCheck').checked = multiScan;
-                    renderTableHead();
-                    renderTable();
-                }
+                // multiScan is intentionally NOT restored — always starts disabled
             }).catch(function(){});
         } catch(e) {}
     }
     function saveData() {
-        try { window.db.set('barcode_records', { records:records, colNames:colNames, multiScan:multiScan }); } catch(e) {}
+        try { window.db.set('barcode_records', { records:records, colNames:colNames }); } catch(e) {}
     }
 
     // ── Rename popup ──────────────────────────────────────────────────────────
