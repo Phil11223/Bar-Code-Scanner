@@ -619,9 +619,9 @@
 
                 var zxErr1 = null, zxErr2 = null;
                 var result = null;
-                try { result = zxPref.decodeFromCanvas(scanCanvas); } catch(e) { zxErr1 = e.message || String(e); }
+                try { result = zxPref.decodeFromImageElement(scanCanvas); } catch(e) { zxErr1 = e.message || String(e); }
                 if (!result) {
-                    try { result = zxFb.decodeFromCanvas(scanCanvas); } catch(e) { zxErr2 = e.message || String(e); }
+                    try { result = zxFb.decodeFromImageElement(scanCanvas); } catch(e) { zxErr2 = e.message || String(e); }
                 }
                 if (!result) {
                     dbg('ZXing no result: ' + (zxErr1||'') + ' | ' + (zxErr2||''));
@@ -645,6 +645,7 @@
             // Runs alongside ZXing. Whichever detects first wins.
             if (typeof BarcodeDetector !== 'undefined') {
                 BarcodeDetector.getSupportedFormats().then(function(formats) {
+                    dbg('BarcodeDetector ready, ' + formats.length + ' formats');
                     var opts = (formats && formats.length) ? { formats: formats } : {};
                     var bd   = new BarcodeDetector(opts);
                     var vid  = document.getElementById('camVideo');
@@ -656,6 +657,7 @@
                                 var bc  = barcodes[0];
                                 var now = Date.now();
                                 if (!(bc.rawValue === lastCode && (now - lastTime) < COOLDOWN)) {
+                                    dbg('BD FOUND: ' + bc.rawValue);
                                     tapPending = false;
                                     lastCode = bc.rawValue; lastTime = now;
                                     commitScan(bc.rawValue, bc.format);
@@ -665,7 +667,9 @@
                         bdLoop = requestAnimationFrame(bdTick);
                     }
                     bdTick();
-                }).catch(function(){});
+                }).catch(function(e){ dbg('BD formats error: ' + e); });
+            } else {
+                dbg('BarcodeDetector NOT available — ZXing only');
             }
 
         }).catch(function(err) {
