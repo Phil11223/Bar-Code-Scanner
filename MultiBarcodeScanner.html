@@ -362,7 +362,7 @@
 </header>
 
 <!-- ── Additional-scan prompt (shown above scanner in rescan/multi mode) ─── -->
-<div id="rescan-prompt">&#128269; Now Scan Additional Barcode / Serial / MAC Address</div>
+<div id="rescan-prompt"></div>
 
 <!-- ── Camera card ────────────────────────────────────────────────────────── -->
 <div class="card" id="cameraCard">
@@ -472,17 +472,9 @@
             void ripple.offsetWidth;
             ripple.classList.add('burst');
 
-            // Reset cooldown so an intentional tap always works
-            lastCode = ''; lastTime = 0;
-
-            // ── Engine-specific tap handling ──────────────────────────────────
-            // Native (mobile): set tapPending flag — the rAF loop picks it up
-            // ZXing (desktop):  call zxTapDecode() directly — grabs the current
-            //                   frame and asks ZXing to decode it on demand,
-            //                   bypassing ZXing's internal callback throttling
-            // Mobile (native): set flag — the rAF scan loop checks it
-            // Desktop (ZXing):  start a per-tap rAF decode loop via zxArmTap()
-            lastCode = ''; lastTime = 0;   // always clear cooldown on explicit tap
+            // Do NOT reset lastCode here — cooldown must stay active to prevent
+            // the same barcode re-firing immediately when user taps for item scan.
+            // lastCode only resets on stopScanner() or when COOLDOWN ms elapse.
             if (useNative) {
                 tapPending = true;
             } else {
@@ -586,6 +578,7 @@
 
         // Show the "Now Scan Additional" prompt when overwriting the item column
         if (col === 'item') {
+            document.getElementById('rescan-prompt').textContent = '🔍 Scan ' + colNames.item;
             document.getElementById('rescan-prompt').style.display = 'block';
         } else {
             document.getElementById('rescan-prompt').style.display = 'none';
@@ -611,10 +604,13 @@
     // updates the top-left overlay on the video. Called wherever state changes.
     function updateScanLabel() {
         var el = document.getElementById('scan-label');
-        // Scan label only shown on mobile (native path) — desktop is continuous
-        if (!scanning || !useNative) { el.style.display = 'none'; return; }
+        // Only show the label when multi-scan is active and camera is running.
+        // Always pull colNames live — user may have renamed headers since last scan.
+        if (!scanning || !multiScan) { el.style.display = 'none'; return; }
 
-        // Which column are we about to scan?
+        // Which column are we about to scan next?
+        // No rescanTarget = fresh row, so next scan fills the value (primary) col.
+        // rescanTarget set = we are mid-row, next scan fills that target col.
         var col = (rescanTarget !== null) ? rescanTarget.col : 'value';
         el.textContent = 'Scan ' + colNames[col];
         el.style.display = 'block';
@@ -857,9 +853,13 @@
             var code    = result.getText();
             var fmt     = result.getBarcodeFormat();
             var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
-            if (code && code.length >= 3) {
+            var now     = Date.now();
+            // Cooldown check — same code that was just scanned must not
+            // re-commit immediately (e.g. still in frame after first scan)
+            if (code && code.length >= 3 &&
+                !(code === lastCode && (now - lastTime) < COOLDOWN)) {
                 tapPending = false;
-                lastCode = code; lastTime = Date.now();
+                lastCode = code; lastTime = now;
                 commitScan(code, fmtName);
                 return;
             }
@@ -873,7 +873,8 @@
     // Mobile:  just sets tapPending — the decodeFromVideoDevice callback checks it.
     function zxArmTap() {
         tapPending = true;
-        lastCode = ''; lastTime = 0;
+        // Do NOT reset lastCode — cooldown must stay active so the same barcode
+        // still in frame on a second tap doesn't double-commit
         if (!isMobile) {
             if (zxScanLoop) { cancelAnimationFrame(zxScanLoop); zxScanLoop = null; }
             zxDoScan();
@@ -936,21 +937,23 @@
             // ── Normal new-record mode ───────────────────────────────────────
             addRecord(code, format);
 
-            // Auto-chain in multi-scan: after the primary (value) scan, immediately
-            // queue up the item column on the same row AND arm tapPending so the
-            // scanner fires as soon as a barcode is in frame — no second tap needed.
+            // Multi-scan chain: after saving the first column (value), set up
+            // rescanTarget pointing to the item column on this same row.
+            // Do NOT auto-arm tapPending — the barcode from scan 1 is still in
+            // frame and would instantly fill item with the same value.
+            // User must tap explicitly to trigger the second scan.
             if (multiScan) {
                 var newIdx = records.length - 1;
                 rescanTarget = { rowIdx: newIdx, col: 'item' };
                 document.getElementById('scanner-container').classList.add('rescan-mode');
-                document.getElementById('tap-hint').textContent = 'SCANNING ITEM...';
+                document.getElementById('tap-hint').textContent = 'TAP TO SCAN';
+                document.getElementById('rescan-prompt').textContent = '🔍 Scan ' + colNames.item;
                 document.getElementById('rescan-prompt').style.display = 'block';
-                lastCode = ''; lastTime = 0;   // clear cooldown for item scan
-                if (useNative) {
-                    tapPending = true;   // native rAF loop picks this up
-                } else {
-                    zxArmTap();          // desktop: start decode loop immediately
-                }
+                tapPending = false;          // explicitly disarmed — wait for tap
+                // Do NOT reset lastCode here — keeping it means the just-scanned
+                // barcode is still in cooldown. If it stays in frame when the user
+                // taps for the item scan, the cooldown check blocks it, preventing
+                // the same value from auto-filling the item column.
                 renderTable();
                 updateScanLabel();
             }
