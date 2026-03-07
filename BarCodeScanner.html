@@ -759,42 +759,54 @@
                         var zxMobilePref = new ZXing.BrowserMultiFormatReader(zxHintsPreferred);
                         var zxMobileFb   = new ZXing.BrowserMultiFormatReader(zxHintsFallback);
 
+                        // Pre-allocate ONE rotation canvas — reused every attempt,
+                        // never recreated. Creating a new canvas every frame was
+                        // thrashing the GPU memory allocator and GC.
+                        var rotCanvas = document.createElement('canvas');
+                        rotCanvas.style.display = 'none';
+                        document.body.appendChild(rotCanvas);
+
+                        // tryDecode: preferred pass (no EAN-8) first to avoid false
+                        // positives on longer barcodes, fallback (with EAN-8) only
+                        // if preferred finds nothing.
+                        function tryDecode(cnv) {
+                            try { return zxMobilePref.decodeFromCanvas(cnv); } catch(e) {}
+                            try { return zxMobileFb.decodeFromCanvas(cnv);   } catch(e) {}
+                            return null;
+                        }
+
+                        // ZXing runs on a 150ms interval instead of every rAF frame.
+                        // BarcodeDetector (Engine 1) still runs on rAF for fast native
+                        // barcodes like UPC-A/EAN-13/QR. ZXing only needs to fire a few
+                        // times per second to catch the barcodes BarcodeDetector misses.
+                        // This stops ZXing canvas work from competing with the video
+                        // texture upload that happens every rAF frame.
                         function zxMobileTick() {
-                            if (!scanning) { zxMobileCanvas.remove(); return; }
-                            if (!tapPending) { requestAnimationFrame(zxMobileTick); return; }
+                            if (!scanning) {
+                                zxMobileCanvas.remove();
+                                rotCanvas.remove();
+                                return;
+                            }
+                            // Reschedule — always, so the interval keeps running
+                            setTimeout(zxMobileTick, 150);
+
+                            if (!tapPending) return;   // not armed, nothing to do
 
                             var vid = document.getElementById('camVideo');
-                            if (!vid || vid.videoWidth === 0 || vid.readyState < 2) {
-                                requestAnimationFrame(zxMobileTick); return;
-                            }
+                            if (!vid || vid.videoWidth === 0 || vid.readyState < 2) return;
 
                             var w = vid.videoWidth, h = vid.videoHeight;
 
-                            // Draw straight — modern Chrome already applies EXIF
-                            // orientation when drawImage copies from a <video> element.
-                            // Do NOT also rotate by screen.orientation.angle — that
-                            // would double-rotate and corrupt the pixels.
+                            // Pass A: straight draw — Chrome applies EXIF correction
+                            // automatically when drawImage reads from a <video> element.
                             zxMobileCanvas.width  = w;
                             zxMobileCanvas.height = h;
-                            var ctx = zxMobileCanvas.getContext('2d');
-                            ctx.drawImage(vid, 0, 0, w, h);
-
-                            // Decode attempt — two-pass per orientation:
-                            //   preferred (no EAN-8) first to avoid false positives,
-                            //   fallback (with EAN-8) if preferred finds nothing.
-                            function tryDecode(cnv) {
-                                try { return zxMobilePref.decodeFromCanvas(cnv); } catch(e) {}
-                                try { return zxMobileFb.decodeFromCanvas(cnv);   } catch(e) {}
-                                return null;
-                            }
-
-                            // Pass A: straight (browser-corrected orientation)
+                            zxMobileCanvas.getContext('2d').drawImage(vid, 0, 0, w, h);
                             var result = tryDecode(zxMobileCanvas);
 
-                            // Pass B: if straight fails, try all 4 rotations.
-                            // Handles older Android WebView that doesn't auto-correct.
+                            // Pass B: if straight fails, try 90°/180°/270° rotations.
+                            // Covers older Android WebView that skips EXIF correction.
                             if (!result) {
-                                var rotCanvas = document.createElement('canvas');
                                 var rotAngles = [90, 180, 270];
                                 for (var ri = 0; ri < rotAngles.length && !result; ri++) {
                                     var deg     = rotAngles[ri];
@@ -820,11 +832,8 @@
                                     tapPending = false;
                                     lastCode = code; lastTime = Date.now();
                                     commitScan(code, fmtName);
-                                    requestAnimationFrame(zxMobileTick);
-                                    return;
                                 }
                             }
-                            requestAnimationFrame(zxMobileTick);
                         }
                         zxMobileTick();
                     });
@@ -864,7 +873,8 @@
 
     function stopNative() {
         if (nativeLoop)   { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
-        // zxMobileTick and zxMobileCanvas clean themselves up when scanning=false
+        // zxMobileTick, zxMobileCanvas, and rotCanvas remove themselves
+        // when they next fire and see scanning=false
         if (nativeStream) { nativeStream.getTracks().forEach(function(t){t.stop();}); nativeStream = null; }
         document.getElementById('camVideo').srcObject = null;
     }
