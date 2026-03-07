@@ -70,11 +70,11 @@
         .menu-item:hover { background: #0f3460; color: #eee; }
 
         /* Toggle switch inside menu */
+        /* Pure div toggle — no <input>, no browser form-state restoration */
         .toggle-switch {
             position: relative; width: 36px; height: 20px;
             flex-shrink: 0; margin-left: auto;
         }
-        .toggle-switch input { display: none; }
         .toggle-track {
             position: absolute; inset: 0;
             background: #333; border-radius: 20px;
@@ -86,8 +86,9 @@
             background: #888; top: 3px; left: 3px;
             transition: all 0.2s;
         }
-        .toggle-switch input:checked + .toggle-track { background: #4cc9f0; }
-        .toggle-switch input:checked + .toggle-track::after {
+        /* .on class applied by JS — never touched by browser cache */
+        .toggle-switch.on .toggle-track { background: #4cc9f0; }
+        .toggle-switch.on .toggle-track::after {
             background: #1a1a2e; left: 19px;
         }
 
@@ -128,11 +129,15 @@
             position: absolute; top: 0; left: 0;
             width: 100%; height: 100%;
             object-fit: cover; display: block;
+            /* Own GPU layer — isolates per-frame video texture updates from
+               the scan-line's compositor animation. Without this the video
+               repaints bleed into the scan-line layer causing stutter. */
+            will-change: transform;
         }
         .scan-overlay {
             position: absolute; top: 50%; left: 50%;
             transform: translate(-50%, -50%);
-            width: 85%; height: 35%;
+            width: 92%; height: 38%;
             border: 2px solid #4cc9f0; border-radius: 6px;
             box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);
             z-index: 10; pointer-events: none;
@@ -143,14 +148,21 @@
             box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);
         }
         .scan-line {
-            position: absolute; width: 100%; height: 2px;
+            position: absolute; left: 0; right: 0; top: 0; height: 2px;
             background: linear-gradient(90deg, transparent, #4cc9f0, transparent);
-            animation: scanLine 1.5s ease-in-out infinite; top: 0;
+            /* translateY animates on the GPU compositor — no layout reflow, always smooth.
+               alternate bounces the line back up instead of snapping to start.
+               will-change promotes to its own layer, preventing paint invalidation. */
+            will-change: transform;
+            animation: scanLine 1.8s ease-in-out infinite alternate;
         }
         #scanner-container.rescan-mode .scan-line {
             background: linear-gradient(90deg, transparent, #f4a261, transparent);
         }
-        @keyframes scanLine { 0%{top:0} 100%{top:100%} }
+        @keyframes scanLine {
+            0%   { transform: translateY(0); }
+            100% { transform: translateY(calc(var(--overlay-h, 120px) - 2px)); }
+        }
 
         #scan-flash {
             position: absolute; inset: 0;
@@ -178,7 +190,8 @@
             background: rgba(0,0,0,0.55); color: #4cc9f0;
             font-size: 0.75rem; font-weight: 700; letter-spacing: 1px;
             padding: 4px 14px; border-radius: 20px;
-            pointer-events: none; z-index: 15; display: none;
+            pointer-events: none; z-index: 25; display: none;
+            transition: opacity 0.3s ease;
         }
         #scanner-container.rescan-mode #tap-hint { color: #f4a261; }
 
@@ -196,10 +209,22 @@
             border-radius: 20px;
             pointer-events: none;
             z-index: 15;
-            display: none;                    /* shown only when camera active */
+            display: none;
             transition: color 0.2s ease;
         }
         #scanner-container.rescan-mode #scan-label { color: #f4a261; }
+
+        /* Torch button — top-right corner of scanner, only shown on mobile */
+        #torch-btn {
+            position: absolute; top: 10px; right: 10px;
+            width: 36px; height: 36px; border-radius: 50%;
+            background: rgba(0,0,0,0.55); border: 1.5px solid rgba(255,255,255,0.25);
+            color: #fff; font-size: 1.1rem; cursor: pointer;
+            z-index: 15; display: none;
+            align-items: center; justify-content: center;
+            transition: background 0.2s, border-color 0.2s;
+        }
+        #torch-btn.on { background: rgba(255,220,0,0.85); border-color: #ffd700; color: #1a1a2e; }
 
         .flash { animation: cardFlash 0.7s ease forwards; }
         @keyframes cardFlash {
@@ -348,13 +373,12 @@
             <span></span><span></span><span></span>
         </div>
         <div id="menu-dropdown">
-            <label class="menu-item" onclick="toggleMultiScan()">
+            <div class="menu-item" onclick="toggleMultiScan()">
                 <span>&#9635; Multi-Scan</span>
-                <div class="toggle-switch">
-                    <input type="checkbox" id="multiScanCheck" />
+                <div class="toggle-switch" id="multiScanToggle">
                     <div class="toggle-track"></div>
                 </div>
-            </label>
+            </div>
         </div>
     </div>
     <div style="width:32px;height:32px;background:#4cc9f0;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:900;color:#1a1a2e;font-size:1rem;">T</div>
@@ -374,6 +398,8 @@
         <div id="tap-ripple"></div>
         <div id="tap-hint">TAP TO SCAN</div>
         <div id="scan-label"></div>
+        <!-- Torch/flashlight button — only shown on mobile when camera active -->
+        <button id="torch-btn" onclick="toggleTorch()" title="Toggle flashlight">&#128294;</button>
     </div>
     <div id="confirm-banner"><span>&#10003;</span>&nbsp;<span id="confirm-text"></span></div>
     <div id="hint"></div>
@@ -382,7 +408,7 @@
         <span id="statusText">Camera not started</span>
     </div>
     <div class="btn-row">
-        <button id="startBtn" onclick="startScanner()">&#9654; Start Camera</button>
+        <button id="startBtn" onclick="dbg('Start button clicked'); startScanner()">&#9654; Start Camera</button>
         <button id="stopBtn"  onclick="stopScanner()">&#9209; Stop Camera</button>
     </div>
 </div>
@@ -413,10 +439,20 @@
     </div>
 </div>
 
+<!-- ── Debug panel (remove once scanning works) ──────────────────────────── -->
+<div id="debug-panel" style="width:100%;max-width:600px;background:#0d0d1a;border:1px solid #4cc9f0;
+     border-radius:10px;padding:12px;margin-bottom:16px;font-family:monospace;font-size:0.75rem;color:#0f0;">
+    <div style="color:#4cc9f0;margin-bottom:6px;font-weight:bold;">🔍 Debug Panel</div>
+    <div id="dbg-info">Loading...</div>
+</div>
+
 <script>
     // ── State ─────────────────────────────────────────────────────────────────
     var records     = [];
     var scanning    = false;
+    var tapPending  = false;   // true = user has tapped, one scan allowed
+    var tapTimer    = null;    // setTimeout handle — cancels scan attempt after 1s
+    var tapSession  = 0;        // increments each tap — invalidates in-flight detect() calls
     var bannerTimer = null;
     var lastCode    = '';
     var lastTime    = 0;
@@ -435,72 +471,281 @@
     var renameCol    = null;   // which col key is being renamed: 'value' or 'item'
     var renameInputEl = null;
 
-    // ── Engine selection ──────────────────────────────────────────────────────
-    // BarcodeDetector = Android/mobile Chrome 83+ (confirmed scanning)
-    // ZXing           = desktop Chrome / Firefox / Safari (confirmed scanning)
-    //
-    // BarcodeDetector also exists in desktop Chrome 88+ so we MUST check for
-    // a mobile device too — otherwise the tap-gated native path runs on laptops.
+    // ── On-screen debug helper ────────────────────────────────────────────────
+    var dbgLines = [];
+    function dbg(msg) {
+        var ts = new Date().toISOString().slice(11,19);
+        dbgLines.unshift('[' + ts + '] ' + msg);
+        if (dbgLines.length > 18) dbgLines.length = 18;
+        var el = document.getElementById('dbg-info');
+        if (el) el.innerHTML = dbgLines.join('<br>');
+    }
+
+    // ── Device / engine detection ─────────────────────────────────────────────
+    // useNative = true  → mobile path: BarcodeDetector rAF loop (OS-level chip)
+    // useNative = false → desktop path: ZXing decodeFromVideoDevice (manages stream)
     var isMobile  = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    // Only use BarcodeDetector on MOBILE — desktop Chrome exposes the API too
+    // but it's unreliable there; ZXing is the correct engine for desktop.
     var useNative = isMobile && (typeof BarcodeDetector !== 'undefined');
-    console.log('Engine:', useNative ? 'BarcodeDetector (native)' : 'ZXing', '| mobile:', isMobile);
+    console.log('Device: ' + (isMobile ? 'mobile' : 'desktop') + ' | engine: ' + (useNative ? 'BarcodeDetector' : 'ZXing'));
 
-    var nativeDetector = null;
-    var nativeStream   = null;
-    var nativeLoop     = null;
-    var zxReader       = null;
+    // ── Engine state ──────────────────────────────────────────────────────────
+    // Native path (BarcodeDetector):
+    var nativeDetector = null;   // BarcodeDetector instance
+    var nativeStream   = null;   // MediaStream (we own it — must stop() on teardown)
+    var nativeLoop     = null;   // rAF handle
 
-    // ── Tap-to-scan gate ──────────────────────────────────────────────────────
-    // Scan loops run continuously but only commit when tapPending = true.
-    var tapPending = false;
+    // ZXing path (desktop):
+    var zxReader = null;         // BrowserMultiFormatReader (manages its own stream)
 
-    document.addEventListener('DOMContentLoaded', function() {
-        renameInputEl = document.getElementById('rename-input');
+    // ── startScanner ─────────────────────────────────────────────────────────
+    // Routes to the correct engine based on device capability.
+    function startScanner() {
+        dbg('startScanner() → ' + (useNative ? 'BarcodeDetector' : 'ZXing'));
+        setStatus('loading', 'Starting camera...');
+        document.getElementById('startBtn').style.display = 'none';
+        document.getElementById('stopBtn').style.display  = '';
+        if (useNative) { startNative(); } else { startZXing(); }
+    }
 
-        var container = document.getElementById('scanner-container');
-        function onTap(e) {
-            if (!scanning) return;
+    // ── startNative (mobile / BarcodeDetector) ────────────────────────────────
+    // Uses the OS-level barcode chip via BarcodeDetector API.
+    // We own the MediaStream → must stop() it ourselves on teardown.
+    // rAF loop: detect(videoElement) every frame — no canvas needed.
+    function startNative() {
+        nativeDetector = new BarcodeDetector({
+            formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39',
+                      'code_93','codabar','itf','qr_code','data_matrix','pdf417','aztec']
+        });
+        navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: { facingMode: { ideal: 'environment' },
+                     width: { ideal: 1280 }, height: { ideal: 720 } }
+        }).then(function(stream) {
+            nativeStream = stream;
 
-            // Ripple at tap point
-            var rect   = container.getBoundingClientRect();
-            var cx     = (e.changedTouches ? e.changedTouches[0].clientX : e.clientX) - rect.left;
-            var cy     = (e.changedTouches ? e.changedTouches[0].clientY : e.clientY) - rect.top;
-            var ripple = document.getElementById('tap-ripple');
-            ripple.style.left = cx + 'px';
-            ripple.style.top  = cy + 'px';
-            ripple.classList.remove('burst');
-            void ripple.offsetWidth;
-            ripple.classList.add('burst');
+            // ── Autofocus ─────────────────────────────────────────────────────
+            // Must use applyConstraints AFTER getUserMedia — adding focusMode
+            // inside the getUserMedia constraints causes silent rejection on some
+            // devices.
+            var track = stream.getVideoTracks()[0];
+            dbg('Camera: ' + (track ? track.label : 'no track'));
+            if (track && track.applyConstraints) {
+                track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] })
+                    .catch(function(){});  // silently ignored if unsupported
+            }
 
-            // Do NOT reset lastCode here — cooldown must stay active to prevent
-            // the same barcode re-firing immediately when user taps for item scan.
-            // lastCode only resets on stopScanner() or when COOLDOWN ms elapse.
-            if (useNative) {
-                tapPending = true;
-            } else {
-                zxArmTap();
+            var video = document.getElementById('camVideo');
+            video.srcObject = stream;
+            video.play();
+
+            // ── Wait for real frames before declaring camera ready ────────────
+            // videoWidth is 0 until hardware delivers the first real frame.
+            // Once ready: show the viewfinder and wait — scan loop does NOT start.
+            // nativeScanFrame() is called only from onTap, never automatically.
+            function waitForFrames() {
+                if (video.videoWidth > 0) {
+                    video.style.opacity = '0.99';
+                    requestAnimationFrame(function() {
+                        video.style.opacity = '1';
+                        scanning = true;
+                        if (isMobile) document.getElementById('torch-btn').style.display = 'flex';
+                        document.getElementById('tap-hint').style.display = 'block';
+                        updateScanLabel();
+                        setStatus('active', 'Point camera at barcode, then tap to scan');
+                        dbg('Native camera ready — waiting for tap');
+                    });
+                } else {
+                    requestAnimationFrame(waitForFrames);
+                }
+            }
+            requestAnimationFrame(waitForFrames);
+
+        }).catch(function(err) {
+            dbg('Camera error: ' + err.message);
+            setStatus('error', 'Camera error: ' + err.message);
+            document.getElementById('startBtn').style.display = '';
+            document.getElementById('stopBtn').style.display  = 'none';
+        });
+    }
+
+    // ── Tap timeout helpers ──────────────────────────────────────────────────
+    // cancelTapTimeout: clears any running 1s timeout (called on success/stop).
+    // resetTapGate: called when timeout fires — cancels the scan loop and resets
+    //               UI back to "waiting for tap" state without stopping the camera.
+    function cancelTapTimeout() {
+        if (tapTimer) { clearTimeout(tapTimer); tapTimer = null; }
+    }
+    function resetTapGate() {
+        tapTimer   = null;
+        tapPending = false;
+        tapSession++;              // invalidates any in-flight detect() from this tap
+        // Cancel any scheduled rAF frame
+        if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
+        setStatus('active', 'Point camera at barcode, then tap to scan');
+        dbg('Tap timeout — no barcode found, waiting for next tap');
+    }
+
+    // ── nativeScanFrame ───────────────────────────────────────────────────────
+    // Started ONLY from onTap — NEVER auto-started when camera opens.
+    // Runs rAF frames until a barcode is found, then stops.
+    // Next tap will restart it for the next scan.
+    function nativeScanFrame() {
+        // Both guards must pass — camera active AND user has tapped
+        if (!scanning || !tapPending) return;
+        var video = document.getElementById('camVideo');
+
+        // Capture session ID NOW — if resetTapGate fires while detect() is
+        // async, it increments tapSession and this stale closure won't commit.
+        var mySession = tapSession;
+
+        if (video.readyState >= 2 && video.videoWidth > 0) {
+            nativeDetector.detect(video).then(function(barcodes) {
+                if (!barcodes.length) return;
+                if (mySession !== tapSession) return;  // timeout fired mid-detect — discard
+                var bc  = barcodes[0];
+                var now = Date.now();
+                if (bc.rawValue === lastCode && (now - lastTime) < COOLDOWN) return;
+                // ── Valid barcode — consume tap, clear timer, stop loop ────────
+                cancelTapTimeout();
+                tapPending = false;
+                tapSession++;      // increment so any other in-flight frames are discarded
+                dbg('BD FOUND: ' + bc.rawValue + ' (' + bc.format + ')');
+                lastCode = bc.rawValue; lastTime = now;
+                commitScan(bc.rawValue, bc.format);
+            }).catch(function(){}).finally(function() {
+                // Only reschedule if this tap session is still active
+                if (scanning && tapPending && mySession === tapSession) {
+                    nativeLoop = requestAnimationFrame(nativeScanFrame);
+                }
+            });
+        } else {
+            if (scanning && tapPending && mySession === tapSession) {
+                nativeLoop = requestAnimationFrame(nativeScanFrame);
             }
         }
-        container.addEventListener('click',    onTap);
-        container.addEventListener('touchend', onTap, { passive: true });
+    }
 
-        // Close menu when clicking outside it
-        document.addEventListener('click', function(e) {
-            var wrap = document.getElementById('menu-wrap');
-            if (!wrap.contains(e.target)) {
-                document.getElementById('menu-dropdown').classList.remove('open');
+    // ── stopNative ────────────────────────────────────────────────────────────
+    function stopNative() {
+        if (nativeLoop)   { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
+        if (nativeStream) { nativeStream.getTracks().forEach(function(t){ t.stop(); }); nativeStream = null; }
+        document.getElementById('camVideo').srcObject = null;
+        nativeDetector = null;
+    }
+
+    // ── startZXing (desktop) ──────────────────────────────────────────────────
+    // ZXing's decodeFromVideoDevice manages its own getUserMedia stream and video
+    // element. It fires the callback on every successful decode — no canvas loop
+    // or setInterval needed. We just handle results in the callback.
+    function startZXing() {
+        // No hints map — plain constructor scans all formats by default.
+        // Passing a hints Map with TRY_HARDER can actually slow down or break
+        // decoding on some browsers; simpler is more reliable here.
+        zxReader = new ZXing.BrowserMultiFormatReader();
+
+        // decodeFromVideoDevice: null deviceId = default camera
+        // Returns a Promise that resolves when scanning STARTS (not when it stops).
+        zxReader.decodeFromVideoDevice(null, 'camVideo', function(result, err) {
+            if (!result)     return;   // err fires on every non-decoded frame — ignore
+            if (!tapPending) return;   // tap gate — only accept a result after a tap
+
+            var code    = result.getText();
+            var fmt     = result.getBarcodeFormat();
+            var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
+            var now     = Date.now();
+            if (!code || code.length < 3) return;
+            if (code === lastCode && (now - lastTime) < COOLDOWN) return;
+            cancelTapTimeout();
+            tapPending = false;
+            tapSession++;      // close the gate for any other in-flight callbacks
+            dbg('ZXing FOUND: ' + code + ' (' + fmtName + ')');
+            lastCode = code; lastTime = now;
+            commitScan(code, fmtName);
+        }).then(function() {
+            scanning = true;
+            document.getElementById('tap-hint').style.display = 'block';
+            updateScanLabel();
+            setStatus('active', 'Scanning... point camera at barcode');
+            dbg('ZXing engine live');
+        }).catch(function(err) {
+            dbg('ZXing error: ' + err.message);
+            setStatus('error', 'Camera error: ' + err.message);
+            document.getElementById('startBtn').style.display = '';
+            document.getElementById('stopBtn').style.display  = 'none';
+        });
+    }
+
+    // ── stopZXing ─────────────────────────────────────────────────────────────
+    function stopZXing() {
+        if (zxReader) { zxReader.reset(); zxReader = null; }
+    }
+
+    // ── stopScanner ───────────────────────────────────────────────────────────
+    // Routes teardown to the correct engine, then resets shared UI state.
+    function stopScanner() {
+        scanning   = false;
+        cancelTapTimeout();
+        tapPending = false;   // clear gate so next session starts clean
+        if (useNative) { stopNative(); } else { stopZXing(); }
+        hideTorchBtn();
+        lastCode = ''; lastTime = 0;
+        document.getElementById('startBtn').style.display = '';
+        document.getElementById('stopBtn').style.display  = 'none';
+        document.getElementById('confirm-banner').classList.remove('show');
+        document.getElementById('tap-hint').style.display = 'none';
+        document.getElementById('scan-label').style.display = 'none';
+        clearRescanTarget();
+        setStatus('idle', 'Camera stopped');
+        setHint('');
+    }
+
+    // ── Torch / flashlight ────────────────────────────────────────────────────
+    // Native path owns nativeStream. ZXing path lets the video element own the
+    // stream via srcObject. getActiveStream() covers both cases.
+    var torchOn = false;
+    function getActiveStream() {
+        if (nativeStream) return nativeStream;
+        var vid = document.getElementById('camVideo');
+        return (vid && vid.srcObject) ? vid.srcObject : null;
+    }
+    function toggleTorch() {
+        var stream = getActiveStream();
+        dbg('torch tapped — stream=' + !!stream + ' torchOn=' + torchOn);
+        if (!stream) { dbg('torch: no stream'); return; }
+        var track = stream.getVideoTracks()[0];
+        if (!track) { dbg('torch: no track'); return; }
+        if (!track.applyConstraints) {
+            dbg('torch: applyConstraints missing');
+            document.getElementById('torch-btn').style.display = 'none'; return;
+        }
+        torchOn = !torchOn;
+        track.applyConstraints({ advanced: [{ torch: torchOn }] })
+            .then(function() {
+                var btn = document.getElementById('torch-btn');
+                torchOn ? btn.classList.add('on') : btn.classList.remove('on');
+                dbg('torch: ' + (torchOn ? 'ON' : 'OFF'));
+            })
+            .catch(function(e) {
+                dbg('torch: FAILED — ' + (e && e.message ? e.message : String(e)));
+                torchOn = false;
+                document.getElementById('torch-btn').style.display = 'none';
+            });
+    }
+    function hideTorchBtn() {
+        torchOn = false;
+        var btn = document.getElementById('torch-btn');
+        btn.style.display = 'none';
+        btn.classList.remove('on');
+        var stream = getActiveStream();
+        if (stream) {
+            var track = stream.getVideoTracks()[0];
+            if (track && track.applyConstraints) {
+                track.applyConstraints({ advanced: [{ torch: false }] }).catch(function(){});
             }
-        });
-
-        // Rename popup: Enter key saves
-        renameInputEl.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') saveRename();
-            if (e.key === 'Escape') closeRename();
-        });
-
-        renderTableHead();
-        loadData();
-    });
+        }
+    }
 
     // ── Menu ──────────────────────────────────────────────────────────────────
     function toggleMenu() {
@@ -508,40 +753,34 @@
     }
 
     function toggleMultiScan() {
-        // The label wraps the toggle, so the checkbox flips automatically.
-        // We read its value on the next tick after the DOM updates.
-        setTimeout(function() {
-            multiScan = document.getElementById('multiScanCheck').checked;
-            if (!multiScan) {
-                // Leaving multi-scan: clear any pending rescan state
-                clearRescanTarget();
-            }
-            renderTableHead();
-            renderTable();
-            updateScanLabel();
-        }, 0);
+        multiScan = !multiScan;
+        var tog = document.getElementById('multiScanToggle');
+        if (multiScan) { tog.classList.add('on'); }
+        else           { tog.classList.remove('on'); clearRescanTarget(); }
+        renderTableHead();
+        renderTable();
+        updateScanLabel();
     }
 
     // ── Persist ───────────────────────────────────────────────────────────────
     function loadData() {
         try {
-            window.db.get('barcode_records').then(function(d) {
-                if (d && d.records)   { records  = d.records;   renderTable(); }
-                if (d && d.colNames)  { colNames  = d.colNames;  renderTableHead(); }
-                if (d && d.multiScan) {
-                    multiScan = d.multiScan;
-                    document.getElementById('multiScanCheck').checked = multiScan;
-                    renderTableHead();
-                    renderTable();
-                }
-            }).catch(function(){});
-        } catch(e) {}
+            var raw = localStorage.getItem('barcode_records');
+            if (raw) {
+                var d = JSON.parse(raw);
+                if (d.records)  { records  = d.records;  renderTable(); }
+                if (d.colNames) { colNames  = d.colNames; renderTableHead(); }
+            }
+        } catch(e) { dbg('loadData error: ' + e); }
     }
     function saveData() {
-        try { window.db.set('barcode_records', { records:records, colNames:colNames, multiScan:multiScan }); } catch(e) {}
+        try {
+            localStorage.setItem('barcode_records',
+                JSON.stringify({ records: records, colNames: colNames }));
+        } catch(e) { dbg('saveData error: ' + e); }
     }
 
-    // ── Rename popup ──────────────────────────────────────────────────────────
+    // ── Rename column popup ───────────────────────────────────────────────────
     function openRename(col) {
         renameCol = col;
         document.getElementById('rename-title').textContent = 'Rename Column';
@@ -556,7 +795,6 @@
     function saveRename() {
         var raw = renameInputEl.value.trim();
         if (!raw) { closeRename(); return; }
-        // Save in Proper Case — capitalise first letter of each word
         colNames[renameCol] = raw.replace(/\w\S*/g, function(w) {
             return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
         });
@@ -567,343 +805,38 @@
     }
 
     // ── Rescan target ─────────────────────────────────────────────────────────
-    // Called when user clicks a data cell in the table during multi-scan mode.
-    // col = 'value' (primary barcode) or 'item' (secondary scanned item).
     function selectRescan(rowIdx, col) {
         rescanTarget = { rowIdx: rowIdx, col: col };
-
-        // Amber overlay on scanner viewport — signals rescan mode
         document.getElementById('scanner-container').classList.add('rescan-mode');
         document.getElementById('tap-hint').textContent = 'TAP TO RESCAN';
-
-        // Show the "Now Scan Additional" prompt when overwriting the item column
         if (col === 'item') {
-            document.getElementById('rescan-prompt').textContent = '🔍 Scan ' + colNames.item;
+            document.getElementById('rescan-prompt').textContent = '\u{1F50D} Scan ' + colNames.item;
             document.getElementById('rescan-prompt').style.display = 'block';
         } else {
             document.getElementById('rescan-prompt').style.display = 'none';
         }
-
-        renderTable(); // re-render to highlight the selected cell
+        renderTable();
         updateScanLabel();
     }
-
     function clearRescanTarget() {
         rescanTarget = null;
+        cancelTapTimeout();            // kill any running 1s timer
+        tapPending   = false;          // gate closes — next scan needs a fresh tap
+        tapSession++;                  // invalidate any in-flight detect()
         document.getElementById('scanner-container').classList.remove('rescan-mode');
         document.getElementById('rescan-prompt').style.display = 'none';
-        if (scanning) {
-            document.getElementById('tap-hint').textContent = 'TAP TO SCAN';
-        }
+        if (scanning) document.getElementById('tap-hint').textContent = 'TAP TO SCAN';
         renderTable();
         updateScanLabel();
     }
 
-    // ── Scan label ───────────────────────────────────────────────────────────
-    // Computes the correct "Scan [header]" text based on current state and
-    // updates the top-left overlay on the video. Called wherever state changes.
+    // ── Scan label overlay ────────────────────────────────────────────────────
     function updateScanLabel() {
         var el = document.getElementById('scan-label');
-        // Only show the label when multi-scan is active and camera is running.
-        // Always pull colNames live — user may have renamed headers since last scan.
         if (!scanning || !multiScan) { el.style.display = 'none'; return; }
-
-        // Which column are we about to scan next?
-        // No rescanTarget = fresh row, so next scan fills the value (primary) col.
-        // rescanTarget set = we are mid-row, next scan fills that target col.
         var col = (rescanTarget !== null) ? rescanTarget.col : 'value';
         el.textContent = 'Scan ' + colNames[col];
         el.style.display = 'block';
-    }
-
-    // ── Start ─────────────────────────────────────────────────────────────────
-    // Mobile: always use BarcodeDetector — it handles camera orientation
-    // natively (OS-level). ZXing on mobile reads frames via canvas which loses
-    // Android EXIF rotation → garbled barcode output.
-    // We intersect our wanted formats with what the device actually supports
-    // so we never pass an unsupported format (which silently causes no detections).
-    // Desktop: always ZXing (canvas tap-decode path, confirmed working).
-    var WANTED_FORMATS = ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf'];
-
-    function startScanner() {
-        setStatus('loading', 'Starting camera...');
-        document.getElementById('startBtn').style.display = 'none';
-        document.getElementById('stopBtn').style.display  = '';
-
-        if (!useNative) { startZXing(); return; }
-
-        // Get the real supported list, intersect with wanted, then start.
-        // If getSupportedFormats fails, just pass all wanted and let the
-        // detector silently skip any unsupported ones.
-        BarcodeDetector.getSupportedFormats().then(function(supported) {
-            var active = WANTED_FORMATS.filter(function(f) {
-                return supported.indexOf(f) !== -1;
-            });
-            console.log('BarcodeDetector active formats:', active);
-            // Always use native on mobile — never fall back to ZXing
-            startNative(active.length ? active : WANTED_FORMATS);
-        }).catch(function() {
-            startNative(WANTED_FORMATS);
-        });
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // MOBILE — Native BarcodeDetector (Android Chrome 83+)
-    // ══════════════════════════════════════════════════════════════════════════
-    function startNative(formats) {
-        nativeDetector = new BarcodeDetector({
-            formats: formats || WANTED_FORMATS
-        });
-        navigator.mediaDevices.getUserMedia({
-            audio: false,
-            video: { facingMode: { ideal: 'environment' }, width: { ideal:1280 }, height: { ideal:720 } }
-        }).then(function(stream) {
-            nativeStream = stream;
-            var video = document.getElementById('camVideo');
-            video.srcObject = stream;
-            video.play();
-            // Poll until videoWidth > 0 (GPU has real frames), then force compositor flush
-            function waitForFrame() {
-                if (video.videoWidth > 0) {
-                    video.style.opacity = '0.99';
-                    requestAnimationFrame(function() {
-                        video.style.opacity = '1';
-                        scanning = true;
-                        setStatus('active', 'Tap viewport to scan');
-                        document.getElementById('tap-hint').style.display = 'block';
-                        updateScanLabel();
-                        nativeScanFrame();
-                    });
-                } else {
-                    requestAnimationFrame(waitForFrame);
-                }
-            }
-            requestAnimationFrame(waitForFrame);
-        }).catch(function(err) {
-            setStatus('error', 'Camera error: ' + err.message);
-            console.error('getUserMedia error:', err);
-            document.getElementById('startBtn').style.display = '';
-            document.getElementById('stopBtn').style.display  = 'none';
-        });
-    }
-
-    function nativeScanFrame() {
-        if (!scanning) return;
-        var video = document.getElementById('camVideo');
-        if (video.readyState >= 2 && video.videoWidth > 0) {
-            nativeDetector.detect(video).then(function(barcodes) {
-                if (barcodes.length > 0 && tapPending) {
-                    var bc = barcodes[0]; var now = Date.now();
-                    // Only consume tap AFTER cooldown passes — prevents the guard
-                    // silently eating the tap with no visible result
-                    if (!(bc.rawValue === lastCode && (now - lastTime) < COOLDOWN)) {
-                        tapPending = false;
-                        lastCode = bc.rawValue; lastTime = now;
-                        commitScan(bc.rawValue, bc.format);
-                    }
-                }
-            }).catch(function(){}).finally(function() {
-                if (scanning) nativeLoop = requestAnimationFrame(nativeScanFrame);
-            });
-        } else {
-            if (scanning) nativeLoop = requestAnimationFrame(nativeScanFrame);
-        }
-    }
-
-    function stopNative() {
-        if (nativeLoop)   { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
-        if (nativeStream) { nativeStream.getTracks().forEach(function(t){t.stop();}); nativeStream = null; }
-        document.getElementById('camVideo').srcObject = null;
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // DESKTOP — ZXing (Chrome, Firefox, Safari)
-    //
-    // Architecture:
-    //   getUserMedia → video element (display only, no ZXing stream ownership)
-    //   On tap: rAF loop draws video frames to a canvas, calls decodeFromCanvas
-    //           which is SYNCHRONOUS in ZXing — it either returns a Result or
-    //           throws NotFoundException. We catch the throw and retry next frame.
-    //
-    // Why not decodeFromVideoDevice callback? ZXing deduplicates internally —
-    // the same barcode held in frame never re-fires the callback after the first
-    // decode, making click-to-scan impossible to implement reliably.
-    // ══════════════════════════════════════════════════════════════════════════
-    // ═══════════════════════════════════════════════════════════════════════════
-    // ZXing — used on desktop, AND on mobile when BarcodeDetector falls back.
-    //
-    // TWO sub-modes selected by isMobile:
-    //
-    //   DESKTOP  → canvas-based tap decode (decodeFromCanvas, synchronous).
-    //              We own getUserMedia so we can draw frames ourselves.
-    //              This sidesteps ZXing's internal deduplication in the
-    //              decodeFromVideoDevice callback loop.
-    //
-    //   MOBILE   → decodeFromVideoDevice with tap gate.
-    //              We do NOT use canvas here because phone cameras apply EXIF
-    //              rotation in the video stream but NOT when drawn to canvas —
-    //              the barcode arrives rotated/mirrored → wrong Code128 sub-table
-    //              → garbled characters like "#02"0.!;(&" instead of the real value.
-    //              decodeFromVideoDevice lets ZXing read the stream natively,
-    //              respecting orientation, so Code 128 decodes correctly.
-    // ═══════════════════════════════════════════════════════════════════════════
-    var zxStream    = null;   // MediaStream for desktop canvas path
-    var zxCanvas    = null;   // hidden canvas, desktop only
-    var zxScanLoop  = null;   // rAF handle, desktop canvas path
-
-    function startZXing() {
-        zxReader = new ZXing.BrowserMultiFormatReader();
-
-        if (isMobile) {
-            // ── Mobile ZXing path ─────────────────────────────────────────────
-            // decodeFromConstraints ignores facingMode in ZXing 0.21.3 and just
-            // picks the first camera (usually front-facing). Fix: we call
-            // getUserMedia ourselves with facingMode:'environment', set the
-            // stream on the video element, then point ZXing at that element.
-            // ZXing reads the live stream natively (correct orientation, no
-            // canvas EXIF issues) while we control which camera is used.
-            navigator.mediaDevices.getUserMedia({
-                audio: false,
-                video: {
-                    facingMode: { ideal: 'environment' },
-                    width:  { ideal: 1280 },
-                    height: { ideal: 720 }
-                }
-            }).then(function(stream) {
-                zxStream = stream;
-                var video = document.getElementById('camVideo');
-                video.srcObject = stream;
-                // Wait for video to be playing before handing it to ZXing
-                return video.play();
-            }).then(function() {
-                // Now ZXing attaches to the already-playing video element
-                return zxReader.decodeFromVideoDevice(null, 'camVideo',
-                    function(result, err) {
-                        if (!result || !tapPending) return;
-                        var code = result.getText();
-                        var fmt  = result.getBarcodeFormat();
-                        var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
-                        if (!code || code.length < 3) return;
-                        tapPending = false;
-                        lastCode = code; lastTime = Date.now();
-                        commitScan(code, fmtName);
-                    }
-                );
-            }).then(function() {
-                scanning = true;
-                setStatus('active', 'Tap viewport to scan');
-                document.getElementById('tap-hint').style.display = 'block';
-                updateScanLabel();
-            }).catch(function(err) {
-                setStatus('error', 'Camera error: ' + err.message);
-                console.error('ZXing mobile error:', err);
-                document.getElementById('startBtn').style.display = '';
-                document.getElementById('stopBtn').style.display  = 'none';
-            });
-
-        } else {
-            // ── Desktop ZXing path: getUserMedia + canvas tap decode ───────────
-            // We own the stream; on tap we draw a frame and call decodeFromCanvas
-            // (synchronous). This lets us do true click-to-scan without fighting
-            // ZXing's internal callback deduplication.
-            zxCanvas = document.createElement('canvas');
-            zxCanvas.style.display = 'none';
-            document.body.appendChild(zxCanvas);
-
-            navigator.mediaDevices.getUserMedia({
-                audio: false,
-                video: { width: { ideal: 1280 }, height: { ideal: 720 } }
-            }).then(function(stream) {
-                zxStream = stream;
-                var video = document.getElementById('camVideo');
-                video.srcObject = stream;
-                return video.play();
-            }).then(function() {
-                scanning = true;
-                setStatus('active', 'Tap viewport to scan');
-                document.getElementById('tap-hint').style.display = 'block';
-                updateScanLabel();
-            }).catch(function(err) {
-                setStatus('error', 'Camera error: ' + err.message);
-                console.error('ZXing desktop error:', err);
-                document.getElementById('startBtn').style.display = '';
-                document.getElementById('stopBtn').style.display  = 'none';
-            });
-        }
-    }
-
-    // ── zxDoScan: rAF tick for desktop canvas path ────────────────────────────
-    // Draws current video frame → canvas → synchronous decodeFromCanvas.
-    // Retries every frame until a barcode is found or tap is cancelled.
-    function zxDoScan() {
-        if (!tapPending || !scanning) return;
-
-        var video = document.getElementById('camVideo');
-        if (!video || video.videoWidth === 0 || video.readyState < 2) {
-            zxScanLoop = requestAnimationFrame(zxDoScan);
-            return;
-        }
-
-        zxCanvas.width  = video.videoWidth;
-        zxCanvas.height = video.videoHeight;
-        zxCanvas.getContext('2d').drawImage(video, 0, 0);
-
-        try {
-            var result  = zxReader.decodeFromCanvas(zxCanvas);
-            var code    = result.getText();
-            var fmt     = result.getBarcodeFormat();
-            var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
-            var now     = Date.now();
-            // Cooldown check — same code that was just scanned must not
-            // re-commit immediately (e.g. still in frame after first scan)
-            if (code && code.length >= 3 &&
-                !(code === lastCode && (now - lastTime) < COOLDOWN)) {
-                tapPending = false;
-                lastCode = code; lastTime = now;
-                commitScan(code, fmtName);
-                return;
-            }
-        } catch (e) { /* NotFoundException — no barcode in this frame, retry */ }
-
-        zxScanLoop = requestAnimationFrame(zxDoScan);
-    }
-
-    // ── zxArmTap: called by onTap / auto-chain ────────────────────────────────
-    // Desktop: starts the canvas rAF decode loop.
-    // Mobile:  just sets tapPending — the decodeFromVideoDevice callback checks it.
-    function zxArmTap() {
-        tapPending = true;
-        // Do NOT reset lastCode — cooldown must stay active so the same barcode
-        // still in frame on a second tap doesn't double-commit
-        if (!isMobile) {
-            if (zxScanLoop) { cancelAnimationFrame(zxScanLoop); zxScanLoop = null; }
-            zxDoScan();
-        }
-    }
-
-    function stopZXing() {
-        tapPending = false;
-        if (zxScanLoop)  { cancelAnimationFrame(zxScanLoop); zxScanLoop = null; }
-        if (zxStream)    { zxStream.getTracks().forEach(function(t){t.stop()}); zxStream = null; }
-        if (zxCanvas)    { zxCanvas.remove(); zxCanvas = null; }
-        if (zxReader)    { zxReader.reset(); zxReader = null; }
-        var video = document.getElementById('camVideo');
-        if (video) video.srcObject = null;
-    }
-
-    // ── Stop ──────────────────────────────────────────────────────────────────
-    function stopScanner() {
-        scanning = false;
-        if (useNative) { stopNative(); } else { stopZXing(); }
-        lastCode = ''; lastTime = 0; tapPending = false;
-        document.getElementById('startBtn').style.display = '';
-        document.getElementById('stopBtn').style.display  = 'none';
-        document.getElementById('confirm-banner').classList.remove('show');
-        document.getElementById('tap-hint').style.display = 'none';
-        document.getElementById('scan-label').style.display = 'none';
-        clearRescanTarget();
-        setStatus('idle', 'Camera stopped');
-        setHint('');
     }
 
     // ── Commit ────────────────────────────────────────────────────────────────
@@ -939,27 +872,27 @@
 
             // Multi-scan chain: after saving the first column (value), set up
             // rescanTarget pointing to the item column on this same row.
-            // Do NOT auto-arm tapPending — the barcode from scan 1 is still in
+            // Do NOT reset lastCode here — keeping the cooldown active prevents the
             // frame and would instantly fill item with the same value.
             // User must tap explicitly to trigger the second scan.
             if (multiScan) {
                 var newIdx = records.length - 1;
                 rescanTarget = { rowIdx: newIdx, col: 'item' };
                 document.getElementById('scanner-container').classList.add('rescan-mode');
-                document.getElementById('tap-hint').textContent = 'TAP TO SCAN';
                 document.getElementById('rescan-prompt').textContent = '🔍 Scan ' + colNames.item;
                 document.getElementById('rescan-prompt').style.display = 'block';
-                tapPending = false;          // explicitly disarmed — wait for tap
-                // Do NOT reset lastCode here — keeping it means the just-scanned
-                // barcode is still in cooldown. If it stays in frame when the user
-                // taps for the item scan, the cooldown check blocks it, preventing
-                // the same value from auto-filling the item column.
+                // Do NOT reset lastCode here — keeping it in cooldown prevents the
+                // just-scanned barcode from auto-filling the item column if it stays
+                // in frame. The 3s cooldown window gives the user time to move the
+                // camera to the item barcode.
                 renderTable();
                 updateScanLabel();
             }
         }
 
         setHint('');
+        // Reset status to idle — dot goes grey, message clearly says "tap to scan"
+        setStatus('idle', 'Tap the viewfinder to scan');
     }
 
     // ── UI ────────────────────────────────────────────────────────────────────
@@ -984,9 +917,86 @@
         addRecord(val, 'manual'); input.value = '';
     }
     document.addEventListener('DOMContentLoaded', function() {
+        renameInputEl = document.getElementById('rename-input');
+
+        // ── Tap handler ───────────────────────────────────────────────────────
+        // Tap enables one scan attempt. The camera viewfinder stays live at all
+        // times — tap just unlocks the detection gate for a single result.
+        var container = document.getElementById('scanner-container');
+        function onTap(e) {
+            if (!scanning) return;
+
+            // ── Ripple visual feedback ────────────────────────────────────────
+            var rect   = container.getBoundingClientRect();
+            var cx     = (e.changedTouches ? e.changedTouches[0].clientX : e.clientX) - rect.left;
+            var cy     = (e.changedTouches ? e.changedTouches[0].clientY : e.clientY) - rect.top;
+            var ripple = document.getElementById('tap-ripple');
+            ripple.style.left = cx + 'px';
+            ripple.style.top  = cy + 'px';
+            ripple.classList.remove('burst');
+            void ripple.offsetWidth;
+            ripple.classList.add('burst');
+
+            // ── Unlock one scan ───────────────────────────────────────────────
+            // Set the gate, then explicitly kick off the native loop if on mobile.
+            // ZXing (desktop) already has its own internal loop — the gate alone
+            // is enough to let the next callback through.
+            // ── Start scan gate ───────────────────────────────────────────
+            // Clear any leftover timer and open a fresh session.
+            cancelTapTimeout();
+            tapSession++;          // new session — kills any stale in-flight detects
+            tapPending = true;
+            setStatus('active', 'Scanning...');
+
+            // ── 1-second timeout ──────────────────────────────────────────────
+            // If no barcode is found within 1s, cancel the attempt and reset
+            // back to the "tap to scan" idle state. Camera stays live.
+            tapTimer = setTimeout(resetTapGate, 1000);
+
+            if (useNative) {
+                // Cancel any previous loop handle before starting fresh
+                if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
+                nativeScanFrame();
+            }
+        }
+        container.addEventListener('click',    onTap);
+        container.addEventListener('touchend', onTap, { passive: true });
+
+        // Close hamburger menu when clicking outside it
+        document.addEventListener('click', function(e) {
+            var wrap = document.getElementById('menu-wrap');
+            if (wrap && !wrap.contains(e.target)) {
+                document.getElementById('menu-dropdown').classList.remove('open');
+            }
+        });
+
+        // Rename popup keyboard shortcuts
+        renameInputEl.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter')  saveRename();
+            if (e.key === 'Escape') closeRename();
+        });
+
+        // Manual input: Enter key submits
         document.getElementById('manualInput').addEventListener('keydown', function(e) {
             if (e.key === 'Enter') addManual();
         });
+
+        // Keep --overlay-h CSS variable in sync with actual scan-overlay height
+        // so the scan-line translateY animation always lands exactly at the bottom
+        var overlay = document.querySelector('.scan-overlay');
+        function syncOverlayH() {
+            if (overlay) overlay.style.setProperty('--overlay-h', overlay.offsetHeight + 'px');
+        }
+        syncOverlayH();
+        if (window.ResizeObserver) {
+            new ResizeObserver(syncOverlayH).observe(overlay);
+        } else {
+            window.addEventListener('resize', syncOverlayH);
+        }
+
+        renderTableHead();
+        loadData();
+        dbg('DOM ready — page bootstrapped');
     });
     function deleteRecord(idx) { records.splice(idx,1); renderTable(); saveData(); }
     function clearAll() { if(!records.length) return; records=[]; clearRescanTarget(); renderTable(); saveData(); }
