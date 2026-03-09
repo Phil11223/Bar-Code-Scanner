@@ -608,7 +608,6 @@
         var mySession = tapSession;
 
         if (video.readyState >= 2 && video.videoWidth > 0) {
-            dbg('detect() firing — readyState=' + video.readyState + ' size=' + video.videoWidth + 'x' + video.videoHeight);
             nativeDetector.detect(video).then(function(barcodes) {
                 if (!barcodes.length) return;
                 if (mySession !== tapSession) return;  // stale session — discard
@@ -622,7 +621,7 @@
                 dbg('BD FOUND: ' + bc.rawValue + ' (' + bc.format + ')');
                 lastCode = bc.rawValue; lastTime = now;
                 commitScan(bc.rawValue, bc.format);
-            }).catch(function(e){ dbg('ERROR: detect() threw — ' + e); }).finally(function() {
+            }).catch(function(){}).finally(function() {
                 // Reschedule only if this tap session is still active
                 if (scanning && tapPending && mySession === tapSession) {
                     nativeLoop = requestAnimationFrame(nativeScanFrame);
@@ -660,12 +659,9 @@
             return;
         }
 
-        // TRY_HARDER: makes ZXing spend more CPU per frame rotating/rescaling
-        // before giving up — required for Code 128 with dense narrow bars on webcam.
-        // EAN-13 works without it; Code 128 (model numbers, ESN labels) does not.
-        var hints = new Map();
-        hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-        zxReader = new ZXing.BrowserMultiFormatReader(hints);
+        // Plain constructor — no hints, no custom interval.
+        // Confirmed working baseline for ZXing 0.21.3.
+        zxReader = new ZXing.BrowserMultiFormatReader();
 
         // decodeFromVideoDevice: null deviceId = default camera
         // Returns a Promise that resolves when scanning STARTS (not when it stops).
