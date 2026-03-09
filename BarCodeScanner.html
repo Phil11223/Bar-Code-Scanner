@@ -677,11 +677,36 @@
             return;
         }
 
+        // ── ZXing hints ──────────────────────────────────────────────────────
+        // TRY_HARDER: tells ZXing to spend more CPU time per frame attempting
+        //   to decode — critical for Code 128 with narrow/dense bars on webcam.
+        // POSSIBLE_FORMATS: explicit allowlist so ZXing doesn't waste time on
+        //   irrelevant formats like Aztec or PDF417 in a product-scanning context.
+        // timeBetweenScansMillis (2nd arg): default is 500ms (2 tries/sec).
+        //   Dropping to 100ms gives 10 tries/sec — much better hit rate for
+        //   a hand-held label moving slightly in frame.
+        var hints = new Map();
+        hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+        hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+            ZXing.BarcodeFormat.CODE_128,
+            ZXing.BarcodeFormat.CODE_39,
+            ZXing.BarcodeFormat.CODE_93,
+            ZXing.BarcodeFormat.EAN_13,
+            ZXing.BarcodeFormat.EAN_8,
+            ZXing.BarcodeFormat.UPC_A,
+            ZXing.BarcodeFormat.UPC_E,
+            ZXing.BarcodeFormat.QR_CODE,
+            ZXing.BarcodeFormat.DATA_MATRIX,
+            ZXing.BarcodeFormat.ITF,
+            ZXing.BarcodeFormat.CODABAR
+        ]);
+
         // ── Wrap constructor in try/catch ─────────────────────────────────────
         // BrowserMultiFormatReader() is synchronous — any exception here would
         // otherwise escape the promise chain and surface as an uncaught error.
         try {
-            zxReader = new ZXing.BrowserMultiFormatReader();
+            // 2nd arg = timeBetweenScansMillis (100ms = ~10 decode attempts/sec)
+            zxReader = new ZXing.BrowserMultiFormatReader(hints, 100);
         } catch(e) {
             dbg('ERROR: ZXing constructor failed — ' + e.message);
             setStatus('error', 'Scanner init failed: ' + e.message);
