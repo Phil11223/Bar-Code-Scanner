@@ -608,26 +608,42 @@
         var mySession = tapSession;
 
         if (video.readyState >= 2 && video.videoWidth > 0) {
-            nativeDetector.detect(video).then(function(barcodes) {
-                // Log only when result count changes — avoids log spam while
-                // still confirming detect() is actually running
-                if (typeof nativeScanFrame._lastCount === 'undefined') nativeScanFrame._lastCount = -1;
-                if (barcodes.length !== nativeScanFrame._lastCount) {
-                    nativeScanFrame._lastCount = barcodes.length;
-                    dbg('detect result: ' + barcodes.length + ' barcode(s) found');
-                }
-                if (!barcodes.length) return;
-                if (mySession !== tapSession) return;  // stale session — discard
-                var bc  = barcodes[0];
-                var now = Date.now();
-                if (bc.rawValue === lastCode && (now - lastTime) < COOLDOWN) return;
-                // ── Valid barcode — consume tap, stop loop ────────────────────
-                cancelTapTimeout();
-                tapPending = false;
-                tapSession++;
-                dbg('BD FOUND: ' + bc.rawValue + ' (' + bc.format + ')');
-                lastCode = bc.rawValue; lastTime = now;
-                commitScan(bc.rawValue, bc.format);
+            // ── Crop to center box using createImageBitmap ────────────────────
+            // The scan overlay is 92% wide × 38% tall, centered in the video.
+            // createImageBitmap(source, x, y, w, h) does the crop at GPU level
+            // and returns an ImageBitmap — a valid BarcodeDetector input type.
+            // This stops barcodes outside the box from being detected.
+            var vw    = video.videoWidth;
+            var vh    = video.videoHeight;
+            var cropW = Math.round(vw * 0.92);
+            var cropH = Math.round(vh * 0.38);
+            var cropX = Math.round((vw - cropW) / 2);
+            var cropY = Math.round((vh - cropH) / 2);
+
+            createImageBitmap(video, cropX, cropY, cropW, cropH)
+            .then(function(bitmap) {
+                return nativeDetector.detect(bitmap).then(function(barcodes) {
+                    bitmap.close();   // free GPU memory immediately
+
+                    // Log only on count change — not per-frame
+                    if (typeof nativeScanFrame._lastCount === 'undefined') nativeScanFrame._lastCount = -1;
+                    if (barcodes.length !== nativeScanFrame._lastCount) {
+                        nativeScanFrame._lastCount = barcodes.length;
+                        dbg('detect result: ' + barcodes.length + ' barcode(s) in box');
+                    }
+                    if (!barcodes.length) return;
+                    if (mySession !== tapSession) return;  // stale session — discard
+                    var bc  = barcodes[0];
+                    var now = Date.now();
+                    if (bc.rawValue === lastCode && (now - lastTime) < COOLDOWN) return;
+                    // ── Valid barcode — consume tap, stop loop ────────────────
+                    cancelTapTimeout();
+                    tapPending = false;
+                    tapSession++;
+                    dbg('BD FOUND: ' + bc.rawValue + ' (' + bc.format + ')');
+                    lastCode = bc.rawValue; lastTime = now;
+                    commitScan(bc.rawValue, bc.format);
+                });
             }).catch(function(e){ dbg('detect ERROR: ' + e); }).finally(function() {
                 // Reschedule only if this tap session is still active
                 if (scanning && tapPending && mySession === tapSession) {
