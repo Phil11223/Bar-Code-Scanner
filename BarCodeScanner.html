@@ -675,9 +675,12 @@
             return;
         }
 
-        // Plain constructor — no hints, no custom interval.
-        // This is the known-working baseline for ZXing 0.21.3.
-        zxReader = new ZXing.BrowserMultiFormatReader();
+        // TRY_HARDER: makes ZXing spend more CPU per frame rotating/rescaling
+        // before giving up — required for Code 128 with dense narrow bars on webcam.
+        // EAN-13 works without it; Code 128 (model numbers, ESN labels) does not.
+        var hints = new Map();
+        hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+        zxReader = new ZXing.BrowserMultiFormatReader(hints);
 
         // decodeFromVideoDevice: null deviceId = default camera
         // Returns a Promise that resolves when scanning STARTS (not when it stops).
