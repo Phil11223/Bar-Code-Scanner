@@ -561,6 +561,7 @@
             // videoWidth is 0 until hardware delivers the first real frame.
             // Once ready: show the viewfinder and wait — scan loop does NOT start.
             // nativeScanFrame() is called only from onTap, never automatically.
+            var waitStart = Date.now();
             function waitForFrames() {
                 if (video.videoWidth > 0) {
                     video.style.opacity = '0.99';
