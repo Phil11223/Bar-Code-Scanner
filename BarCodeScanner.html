@@ -701,9 +701,11 @@
             var fmt     = result.getBarcodeFormat();
             var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
             var now     = Date.now();
+            // Log raw value BEFORE any filter so we can see partial/garbled reads
+            dbg('ZXing RAW: [' + code + '] fmt=' + fmtName + ' len=' + (code ? code.length : 0));
             if (!code || code.length < 3) return;
             if (code === lastCode && (now - lastTime) < COOLDOWN) {
-                dbg('ZXing COOLDOWN blocked: ' + code);
+                dbg('ZXing COOLDOWN blocked: [' + code + ']');
                 return;
             }
             cancelTapTimeout();
@@ -995,6 +997,8 @@
             cancelTapTimeout();
             tapSession++;          // new session — kills any stale in-flight detects
             tapPending = true;
+            lastCode  = '';        // reset cooldown — each tap is fresh user intent,
+            lastTime  = 0;         // so the same barcode can be re-scanned immediately
             setStatus('active', 'Scanning...');
             dbg('TAP registered — session=' + tapSession + ' engine=' + (useNative ? 'native' : 'ZXing'));
 
