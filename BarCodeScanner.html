@@ -624,22 +624,7 @@
         var mySession = tapSession;
 
         if (video.readyState >= 2 && video.videoWidth > 0) {
-            // ── Crop to overlay region before detect() ────────────────────────
-            // The overlay box is 92% wide × 38% tall, centered in the video.
-            // Drawing only that slice to a canvas means BarcodeDetector only
-            // sees barcodes INSIDE the box — ignoring any above/below it.
-            var vw = video.videoWidth;
-            var vh = video.videoHeight;
-            var cropW = Math.round(vw * 0.92);
-            var cropH = Math.round(vh * 0.38);
-            var cropX = Math.round((vw - cropW) / 2);  // centered horizontally
-            var cropY = Math.round((vh - cropH) / 2);  // centered vertically
-            var cropCanvas = document.createElement('canvas');
-            cropCanvas.width  = cropW;
-            cropCanvas.height = cropH;
-            cropCanvas.getContext('2d').drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-
-            nativeDetector.detect(cropCanvas).then(function(barcodes) {
+            nativeDetector.detect(video).then(function(barcodes) {
                 if (!barcodes.length) return;
                 if (mySession !== tapSession) return;  // timeout fired mid-detect — discard
                 var bc  = barcodes[0];
