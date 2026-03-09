@@ -642,17 +642,18 @@
     }
 
     // ── startZXing (desktop) ──────────────────────────────────────────────────
-    // Uses ZXing's decodeFromVideoDevice which manages its own stream.
-    // TRY_HARDER is needed for dense/small barcodes.
-    // The tapPending gate in the callback controls when results are accepted.
+    // ZXing's decodeFromVideoDevice manages its own getUserMedia stream and video
+    // element. It fires the callback on every successful decode — no canvas loop
+    // or setInterval needed. We just handle results in the callback.
     function startZXing() {
-        var hints = new Map();
-        hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-        zxReader = new ZXing.BrowserMultiFormatReader(hints);
+        // No hints map — plain constructor scans all formats by default.
+        zxReader = new ZXing.BrowserMultiFormatReader();
 
+        // decodeFromVideoDevice: null deviceId = default camera
+        // Returns a Promise that resolves when scanning STARTS (not when it stops).
         zxReader.decodeFromVideoDevice(null, 'camVideo', function(result, err) {
-            if (!result)     return;  // err fires on every no-decode frame — ignore
-            if (!tapPending) return;  // tap gate — only commit after user taps
+            if (!result)     return;   // err fires on every non-decoded frame — ignore
+            if (!tapPending) return;   // tap gate — only accept a result after a tap
 
             var code    = result.getText();
             var fmt     = result.getBarcodeFormat();
@@ -660,7 +661,6 @@
             var now     = Date.now();
             if (!code || code.length < 3) return;
             if (code === lastCode && (now - lastTime) < COOLDOWN) return;
-
             cancelTapTimeout();
             tapPending = false;
             tapSession++;
@@ -672,7 +672,7 @@
             document.getElementById('tap-hint').style.display = 'block';
             updateScanLabel();
             setStatus('active', 'Point camera at barcode, then tap to scan');
-            dbg('ZXing engine live — waiting for tap');
+            dbg('ZXing engine live');
         }).catch(function(err) {
             dbg('ZXing error: ' + err.message);
             setStatus('error', 'Camera error: ' + err.message);
