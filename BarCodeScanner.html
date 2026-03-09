@@ -456,7 +456,7 @@
     var bannerTimer = null;
     var lastCode    = '';
     var lastTime    = 0;
-    var COOLDOWN    = 1500;  // ms — prevents same code re-committing on back-to-back taps
+        var COOLDOWN    = 3000;
 
     // ── Multi-scan state ──────────────────────────────────────────────────────
     // multiScan: feature toggle from the dropdown menu
@@ -583,14 +583,8 @@
         tapSession++;              // invalidates any in-flight detect() from this tap
         // Cancel any scheduled native rAF frame
         if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
-        setStatus('active', 'No barcode found — tap again to retry');
+        setStatus('active', 'Point camera at barcode, then tap to scan');
         dbg('Tap timeout — no barcode found, waiting for next tap');
-        // Clear the "no barcode" message after 2s and go back to normal prompt
-        setTimeout(function() {
-            if (!tapPending && scanning) {
-                setStatus('active', 'Point camera at barcode, then tap to scan');
-            }
-        }, 2000);
     }
 
     // ── nativeScanFrame ───────────────────────────────────────────────────────
@@ -671,7 +665,7 @@
             scanning = true;
             document.getElementById('tap-hint').style.display = 'block';
             updateScanLabel();
-            setStatus('active', 'Point camera at barcode, then tap to scan');
+            setStatus('active', 'Scanning... point camera at barcode');
             dbg('ZXing engine live');
         }).catch(function(err) {
             dbg('ZXing error: ' + err.message);
@@ -952,10 +946,9 @@
             tapPending = true;
             setStatus('active', 'Scanning...');
 
-            // ── 4-second timeout ──────────────────────────────────────────────
-            // Camera autofocus alone can take 1-2s. Dense barcodes take longer.
-            // 4s gives enough time to focus + decode without feeling stuck.
-            tapTimer = setTimeout(resetTapGate, 4000);
+            // ── 1-second timeout ──────────────────────────────────────────────
+            // If no barcode found within 1s, reset and wait for next tap.
+            tapTimer = setTimeout(resetTapGate, 1000);
 
             if (useNative) {
                 // Cancel any previous loop handle before starting fresh
