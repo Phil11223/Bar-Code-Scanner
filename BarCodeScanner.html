@@ -706,7 +706,10 @@
         // otherwise escape the promise chain and surface as an uncaught error.
         try {
             // 2nd arg = timeBetweenScansMillis (100ms = ~10 decode attempts/sec)
-            zxReader = new ZXing.BrowserMultiFormatReader(hints, 100);
+            // 50ms between scan attempts = ~20 decode tries/sec
+            // videoConstraints: force 640×480 so ZXing processes 3× fewer pixels
+            // per frame vs 1280×720 — biggest single factor in decode speed.
+            zxReader = new ZXing.BrowserMultiFormatReader(hints, 50);
         } catch(e) {
             dbg('ERROR: ZXing constructor failed — ' + e.message);
             setStatus('error', 'Scanner init failed: ' + e.message);
@@ -717,6 +720,13 @@
 
         // decodeFromVideoDevice: null deviceId = default camera
         // Returns a Promise that resolves when scanning STARTS (not when it stops).
+        // Pass 640×480 constraints directly — ZXing handles getUserMedia internally
+        // so we can't set this in startNative's getUserMedia call.
+        var videoConstraints = {
+            facingMode: { ideal: 'environment' },
+            width:  { ideal: 640 },
+            height: { ideal: 480 }
+        };
         zxReader.decodeFromVideoDevice(null, 'camVideo', function(result, err) {
             if (!result)     return;   // err fires on every non-decoded frame — ignore
             dbg('ZXing cb: result=' + !!result + ' tapPending=' + tapPending + ' code=' + (result ? result.getText() : '-'));
@@ -739,7 +749,7 @@
             dbg('ZXing FOUND: ' + code + ' (' + fmtName + ')');
             lastCode = code; lastTime = now;
             commitScan(code, fmtName);
-        }).then(function() {
+        }, videoConstraints).then(function() {
             scanning = true;
             document.getElementById('tap-hint').style.display = 'block';
             updateScanLabel();
