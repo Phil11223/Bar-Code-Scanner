@@ -527,11 +527,13 @@
             document.getElementById('stopBtn').style.display  = 'none';
             return;
         }
+        dbg('getUserMedia: requesting camera...');
         navigator.mediaDevices.getUserMedia({
             audio: false,
             video: { facingMode: { ideal: 'environment' },
                      width: { ideal: 1280 }, height: { ideal: 720 } }
         }).then(function(stream) {
+            dbg('getUserMedia: stream granted');
             nativeStream = stream;
 
             // ── Autofocus ─────────────────────────────────────────────────────
@@ -539,21 +541,29 @@
             // inside the getUserMedia constraints causes silent rejection on some
             // devices.
             var track = stream.getVideoTracks()[0];
-            dbg('Camera: ' + (track ? track.label : 'no track'));
+            dbg('Camera track: ' + (track ? track.label : 'NO TRACK'));
             if (track && track.applyConstraints) {
                 track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] })
                     .catch(function(){});  // silently ignored if unsupported
             }
 
             var video = document.getElementById('camVideo');
+            dbg('video element found: ' + !!video);
             video.srcObject = stream;
-            video.play();
+            dbg('srcObject set — calling play()');
+            video.play().then(function() {
+                dbg('video.play() resolved');
+            }).catch(function(pe) {
+                dbg('video.play() FAILED: ' + pe.message);
+            });
 
             // ── Wait for real frames before declaring camera ready ────────────
             // videoWidth is 0 until hardware delivers the first real frame.
             // Once ready: show the viewfinder and wait — scan loop does NOT start.
             // nativeScanFrame() is called only from onTap, never automatically.
+            var waitStart = Date.now();
             function waitForFrames() {
+                dbg('waitForFrames: videoWidth=' + video.videoWidth + ' t=' + (Date.now()-waitStart) + 'ms');
                 if (video.videoWidth > 0) {
                     video.style.opacity = '0.99';
                     requestAnimationFrame(function() {
@@ -565,6 +575,12 @@
                         setStatus('active', 'Point camera at barcode, then tap to scan');
                         dbg('Native camera ready — waiting for tap');
                     });
+                } else if (Date.now() - waitStart > 8000) {
+                    // 8s timeout — hardware never delivered a frame
+                    dbg('ERROR: waitForFrames timed out — videoWidth still 0 after 8s');
+                    setStatus('error', 'Camera timed out. Check permissions and retry.');
+                    document.getElementById('startBtn').style.display = '';
+                    document.getElementById('stopBtn').style.display  = 'none';
                 } else {
                     requestAnimationFrame(waitForFrames);
                 }
@@ -572,7 +588,7 @@
             requestAnimationFrame(waitForFrames);
 
         }).catch(function(err) {
-            dbg('Camera error: ' + err.message);
+            dbg('getUserMedia FAILED: ' + err.name + ' — ' + err.message);
             setStatus('error', 'Camera error: ' + err.message);
             document.getElementById('startBtn').style.display = '';
             document.getElementById('stopBtn').style.display  = 'none';
