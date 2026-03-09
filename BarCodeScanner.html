@@ -159,6 +159,10 @@
         #scanner-container.rescan-mode .scan-line {
             background: linear-gradient(90deg, transparent, #f4a261, transparent);
         }
+        /* Red line while a tap-scan is actively in progress (2s window) */
+        #scanner-container.scanning-active .scan-line {
+            background: linear-gradient(90deg, transparent, #ff3b3b, transparent);
+        }
         @keyframes scanLine {
             0%   { transform: translateY(0); }
             100% { transform: translateY(calc(var(--overlay-h, 120px) - 2px)); }
@@ -590,6 +594,8 @@
         tapSession++;              // invalidates any in-flight detect() from this tap
         // Cancel any scheduled native rAF frame
         if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
+        // Line back to default colour — scanning window closed
+        document.getElementById('scanner-container').classList.remove('scanning-active');
         setStatus('active', 'Point camera at barcode, then tap to scan');
         dbg('Tap timeout — no barcode found, waiting for next tap');
     }
@@ -734,6 +740,7 @@
         scanning   = false;
         cancelTapTimeout();
         tapPending = false;   // clear gate so next session starts clean
+        document.getElementById('scanner-container').classList.remove('scanning-active');
         if (useNative) { stopNative(); } else { stopZXing(); }
         hideTorchBtn();
         lastCode = ''; lastTime = 0;
@@ -889,6 +896,8 @@
     // If rescanTarget is set: overwrite that cell and clear the target.
     // Otherwise: add a new record as normal.
     function commitScan(code, format) {
+        // Line back to default colour — scan succeeded
+        document.getElementById('scanner-container').classList.remove('scanning-active');
         // Flash feedback always fires
         var fl = document.getElementById('scan-flash');
         fl.classList.remove('pop'); void fl.offsetWidth; fl.classList.add('pop');
@@ -997,10 +1006,12 @@
             setStatus('active', 'Scanning...');
             dbg('TAP registered — session=' + tapSession + ' engine=' + (useNative ? 'native' : 'ZXing'));
 
-            // No timeout — tapPending stays open until ZXing finds a barcode.
-            // A new tap cancels the current session via tapSession++, so stale
-            // results are always discarded safely.
-            // tapTimer = setTimeout(resetTapGate, ...);  // disabled
+            // Mark container so CSS turns the scan line red for the 2s window
+            document.getElementById('scanner-container').classList.add('scanning-active');
+
+            // 2s timeout — if nothing found, cancel and return to standby.
+            // A new tap resets the timer via cancelTapTimeout() above.
+            tapTimer = setTimeout(resetTapGate, 2000);
 
             if (useNative) {
                 // Cancel any previous loop handle before starting fresh
