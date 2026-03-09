@@ -514,10 +514,19 @@
     // We own the MediaStream → must stop() it ourselves on teardown.
     // rAF loop: detect(videoElement) every frame — no canvas needed.
     function startNative() {
+        // ── Guard: BarcodeDetector constructor ───────────────────────────────
+        try {
         nativeDetector = new BarcodeDetector({
             formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39',
                       'code_93','codabar','itf','qr_code','data_matrix','pdf417','aztec']
         });
+        } catch(e) {
+            dbg('ERROR: BarcodeDetector constructor failed — ' + e.message);
+            setStatus('error', 'Scanner init failed: ' + e.message);
+            document.getElementById('startBtn').style.display = '';
+            document.getElementById('stopBtn').style.display  = 'none';
+            return;
+        }
         navigator.mediaDevices.getUserMedia({
             audio: false,
             video: { facingMode: { ideal: 'environment' },
@@ -640,8 +649,30 @@
     // element. It fires the callback on every successful decode — no canvas loop
     // or setInterval needed. We just handle results in the callback.
     function startZXing() {
-        // No hints map — plain constructor scans all formats by default.
-        zxReader = new ZXing.BrowserMultiFormatReader();
+        // ── Guard: ZXing library must be loaded from CDN ─────────────────────
+        // If unpkg CDN failed (network error, timeout) window.ZXing is undefined.
+        // Without this check the constructor throws a silent ReferenceError and
+        // the UI freezes with the Stop button showing but no camera feed.
+        if (typeof ZXing === 'undefined') {
+            dbg('ERROR: ZXing library not loaded — check CDN / network');
+            setStatus('error', 'Library failed to load. Refresh the page.');
+            document.getElementById('startBtn').style.display = '';
+            document.getElementById('stopBtn').style.display  = 'none';
+            return;
+        }
+
+        // ── Wrap constructor in try/catch ─────────────────────────────────────
+        // BrowserMultiFormatReader() is synchronous — any exception here would
+        // otherwise escape the promise chain and surface as an uncaught error.
+        try {
+            zxReader = new ZXing.BrowserMultiFormatReader();
+        } catch(e) {
+            dbg('ERROR: ZXing constructor failed — ' + e.message);
+            setStatus('error', 'Scanner init failed: ' + e.message);
+            document.getElementById('startBtn').style.display = '';
+            document.getElementById('stopBtn').style.display  = 'none';
+            return;
+        }
 
         // decodeFromVideoDevice: null deviceId = default camera
         // Returns a Promise that resolves when scanning STARTS (not when it stops).
