@@ -159,6 +159,10 @@
         #scanner-container.rescan-mode .scan-line {
             background: linear-gradient(90deg, transparent, #f4a261, transparent);
         }
+        /* Red line while a tap-scan is actively in progress (2s window) */
+        #scanner-container.scanning-active .scan-line {
+            background: linear-gradient(90deg, transparent, #ff3b3b, transparent);
+        }
         @keyframes scanLine {
             0%   { transform: translateY(0); }
             100% { transform: translateY(calc(var(--overlay-h, 120px) - 2px)); }
@@ -456,7 +460,7 @@
     var bannerTimer = null;
     var lastCode    = '';
     var lastTime    = 0;
-    var COOLDOWN    = 3000;
+        var COOLDOWN    = 3000;
 
     // ── Multi-scan state ──────────────────────────────────────────────────────
     // multiScan: feature toggle from the dropdown menu
@@ -514,10 +518,19 @@
     // We own the MediaStream → must stop() it ourselves on teardown.
     // rAF loop: detect(videoElement) every frame — no canvas needed.
     function startNative() {
+        // ── Guard: BarcodeDetector constructor ───────────────────────────────
+        try {
         nativeDetector = new BarcodeDetector({
             formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39',
                       'code_93','codabar','itf','qr_code','data_matrix','pdf417','aztec']
         });
+        } catch(e) {
+            dbg('ERROR: BarcodeDetector constructor failed — ' + e.message);
+            setStatus('error', 'Scanner init failed: ' + e.message);
+            document.getElementById('startBtn').style.display = '';
+            document.getElementById('stopBtn').style.display  = 'none';
+            return;
+        }
         navigator.mediaDevices.getUserMedia({
             audio: false,
             video: { facingMode: { ideal: 'environment' },
@@ -526,24 +539,21 @@
             nativeStream = stream;
 
             // ── Autofocus ─────────────────────────────────────────────────────
-            // Must use applyConstraints AFTER getUserMedia — adding focusMode
-            // inside the getUserMedia constraints causes silent rejection on some
-            // devices.
             var track = stream.getVideoTracks()[0];
             dbg('Camera: ' + (track ? track.label : 'no track'));
             if (track && track.applyConstraints) {
                 track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] })
-                    .catch(function(){});  // silently ignored if unsupported
+                    .catch(function(){});
             }
 
             var video = document.getElementById('camVideo');
             video.srcObject = stream;
             video.play();
 
-            // ── Wait for real frames before declaring camera ready ────────────
-            // videoWidth is 0 until hardware delivers the first real frame.
-            // Once ready: show the viewfinder and wait — scan loop does NOT start.
-            // nativeScanFrame() is called only from onTap, never automatically.
+            // ── Wait for first real frame, then declare camera ready ──────────
+            // videoWidth is 0 until the hardware delivers a real frame.
+            // scanning = true only after the first frame arrives — this is what
+            // allows onTap to proceed.
             function waitForFrames() {
                 if (video.videoWidth > 0) {
                     video.style.opacity = '0.99';
@@ -570,6 +580,7 @@
         });
     }
 
+
     // ── Tap timeout helpers ──────────────────────────────────────────────────
     // cancelTapTimeout: clears any running 1s timeout (called on success/stop).
     // resetTapGate: called when timeout fires — cancels the scan loop and resets
@@ -581,8 +592,10 @@
         tapTimer   = null;
         tapPending = false;
         tapSession++;              // invalidates any in-flight detect() from this tap
-        // Cancel any scheduled rAF frame
+        // Cancel any scheduled native rAF frame
         if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
+        // Line back to default colour — scanning window closed
+        document.getElementById('scanner-container').classList.remove('scanning-active');
         setStatus('active', 'Point camera at barcode, then tap to scan');
         dbg('Tap timeout — no barcode found, waiting for next tap');
     }
@@ -601,21 +614,44 @@
         var mySession = tapSession;
 
         if (video.readyState >= 2 && video.videoWidth > 0) {
-            nativeDetector.detect(video).then(function(barcodes) {
-                if (!barcodes.length) return;
-                if (mySession !== tapSession) return;  // timeout fired mid-detect — discard
-                var bc  = barcodes[0];
-                var now = Date.now();
-                if (bc.rawValue === lastCode && (now - lastTime) < COOLDOWN) return;
-                // ── Valid barcode — consume tap, clear timer, stop loop ────────
-                cancelTapTimeout();
-                tapPending = false;
-                tapSession++;      // increment so any other in-flight frames are discarded
-                dbg('BD FOUND: ' + bc.rawValue + ' (' + bc.format + ')');
-                lastCode = bc.rawValue; lastTime = now;
-                commitScan(bc.rawValue, bc.format);
-            }).catch(function(){}).finally(function() {
-                // Only reschedule if this tap session is still active
+            // ── Crop to center box using createImageBitmap ────────────────────
+            // The scan overlay is 92% wide × 38% tall, centered in the video.
+            // createImageBitmap(source, x, y, w, h) does the crop at GPU level
+            // and returns an ImageBitmap — a valid BarcodeDetector input type.
+            // This stops barcodes outside the box from being detected.
+            var vw    = video.videoWidth;
+            var vh    = video.videoHeight;
+            var cropW = Math.round(vw * 0.92);
+            var cropH = Math.round(vh * 0.38);
+            var cropX = Math.round((vw - cropW) / 2);
+            var cropY = Math.round((vh - cropH) / 2);
+
+            createImageBitmap(video, cropX, cropY, cropW, cropH)
+            .then(function(bitmap) {
+                return nativeDetector.detect(bitmap).then(function(barcodes) {
+                    bitmap.close();   // free GPU memory immediately
+
+                    // Log only on count change — not per-frame
+                    if (typeof nativeScanFrame._lastCount === 'undefined') nativeScanFrame._lastCount = -1;
+                    if (barcodes.length !== nativeScanFrame._lastCount) {
+                        nativeScanFrame._lastCount = barcodes.length;
+                        dbg('detect result: ' + barcodes.length + ' barcode(s) in box');
+                    }
+                    if (!barcodes.length) return;
+                    if (mySession !== tapSession) return;  // stale session — discard
+                    var bc  = barcodes[0];
+                    var now = Date.now();
+                    if (bc.rawValue === lastCode && (now - lastTime) < COOLDOWN) return;
+                    // ── Valid barcode — consume tap, stop loop ────────────────
+                    cancelTapTimeout();
+                    tapPending = false;
+                    tapSession++;
+                    dbg('BD FOUND: ' + bc.rawValue + ' (' + bc.format + ')');
+                    lastCode = bc.rawValue; lastTime = now;
+                    commitScan(bc.rawValue, bc.format);
+                });
+            }).catch(function(e){ dbg('detect ERROR: ' + e); }).finally(function() {
+                // Reschedule only if this tap session is still active
                 if (scanning && tapPending && mySession === tapSession) {
                     nativeLoop = requestAnimationFrame(nativeScanFrame);
                 }
@@ -640,9 +676,20 @@
     // element. It fires the callback on every successful decode — no canvas loop
     // or setInterval needed. We just handle results in the callback.
     function startZXing() {
-        // No hints map — plain constructor scans all formats by default.
-        // Passing a hints Map with TRY_HARDER can actually slow down or break
-        // decoding on some browsers; simpler is more reliable here.
+        // ── Guard: ZXing library must be loaded from CDN ─────────────────────
+        // If unpkg CDN failed (network error, timeout) window.ZXing is undefined.
+        // Without this check the constructor throws a silent ReferenceError and
+        // the UI freezes with the Stop button showing but no camera feed.
+        if (typeof ZXing === 'undefined') {
+            dbg('ERROR: ZXing library not loaded — check CDN / network');
+            setStatus('error', 'Library failed to load. Refresh the page.');
+            document.getElementById('startBtn').style.display = '';
+            document.getElementById('stopBtn').style.display  = 'none';
+            return;
+        }
+
+        // Plain constructor — no hints, no custom interval.
+        // Confirmed working baseline for ZXing 0.21.3.
         zxReader = new ZXing.BrowserMultiFormatReader();
 
         // decodeFromVideoDevice: null deviceId = default camera
@@ -650,16 +697,21 @@
         zxReader.decodeFromVideoDevice(null, 'camVideo', function(result, err) {
             if (!result)     return;   // err fires on every non-decoded frame — ignore
             if (!tapPending) return;   // tap gate — only accept a result after a tap
+            // Only log when tapPending is true (i.e. user has tapped and we're actively trying)
+            dbg('ZXing cb: tapPending=true code=' + result.getText());
 
             var code    = result.getText();
             var fmt     = result.getBarcodeFormat();
             var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
             var now     = Date.now();
             if (!code || code.length < 3) return;
-            if (code === lastCode && (now - lastTime) < COOLDOWN) return;
+            if (code === lastCode && (now - lastTime) < COOLDOWN) {
+                dbg('ZXing COOLDOWN blocked: [' + code + ']');
+                return;
+            }
             cancelTapTimeout();
             tapPending = false;
-            tapSession++;      // close the gate for any other in-flight callbacks
+            tapSession++;
             dbg('ZXing FOUND: ' + code + ' (' + fmtName + ')');
             lastCode = code; lastTime = now;
             commitScan(code, fmtName);
@@ -688,6 +740,7 @@
         scanning   = false;
         cancelTapTimeout();
         tapPending = false;   // clear gate so next session starts clean
+        document.getElementById('scanner-container').classList.remove('scanning-active');
         if (useNative) { stopNative(); } else { stopZXing(); }
         hideTorchBtn();
         lastCode = ''; lastTime = 0;
@@ -843,6 +896,8 @@
     // If rescanTarget is set: overwrite that cell and clear the target.
     // Otherwise: add a new record as normal.
     function commitScan(code, format) {
+        // Line back to default colour — scan succeeded
+        document.getElementById('scanner-container').classList.remove('scanning-active');
         // Flash feedback always fires
         var fl = document.getElementById('scan-flash');
         fl.classList.remove('pop'); void fl.offsetWidth; fl.classList.add('pop');
@@ -946,21 +1001,38 @@
             cancelTapTimeout();
             tapSession++;          // new session — kills any stale in-flight detects
             tapPending = true;
+            lastCode  = '';        // reset cooldown — each tap is fresh user intent,
+            lastTime  = 0;         // so the same barcode can be re-scanned immediately
             setStatus('active', 'Scanning...');
+            dbg('TAP registered — session=' + tapSession + ' engine=' + (useNative ? 'native' : 'ZXing'));
 
-            // ── 1-second timeout ──────────────────────────────────────────────
-            // If no barcode is found within 1s, cancel the attempt and reset
-            // back to the "tap to scan" idle state. Camera stays live.
-            tapTimer = setTimeout(resetTapGate, 1000);
+            // Mark container so CSS turns the scan line red for the 2s window
+            document.getElementById('scanner-container').classList.add('scanning-active');
+
+            // 2s timeout — if nothing found, cancel and return to standby.
+            // A new tap resets the timer via cancelTapTimeout() above.
+            tapTimer = setTimeout(resetTapGate, 2000);
 
             if (useNative) {
                 // Cancel any previous loop handle before starting fresh
                 if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
                 nativeScanFrame();
             }
+            // ZXing (desktop): decodeFromVideoDevice runs its own loop —
+            // tapPending gate in the callback handles accepting/rejecting results
         }
-        container.addEventListener('click',    onTap);
-        container.addEventListener('touchend', onTap, { passive: true });
+        // On mobile, touchend fires then ~300ms later a ghost click fires too.
+        // We use a flag to swallow that ghost click so each physical tap = 1 session.
+        var lastTouchEnd = 0;
+        container.addEventListener('touchend', function(e) {
+            lastTouchEnd = Date.now();
+            onTap(e);
+        });
+        container.addEventListener('click', function(e) {
+            // If a touchend fired within the last 500ms this is a ghost click — ignore it
+            if (Date.now() - lastTouchEnd < 500) return;
+            onTap(e);
+        });
 
         // Close hamburger menu when clicking outside it
         document.addEventListener('click', function(e) {
