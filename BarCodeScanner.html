@@ -456,7 +456,7 @@
     var bannerTimer = null;
     var lastCode    = '';
     var lastTime    = 0;
-    var COOLDOWN    = 3000;
+    var COOLDOWN    = 1500;  // ms — prevents same code re-committing on back-to-back taps
 
     // ── Multi-scan state ──────────────────────────────────────────────────────
     // multiScan: feature toggle from the dropdown menu
@@ -667,7 +667,7 @@
             scanning = true;
             document.getElementById('tap-hint').style.display = 'block';
             updateScanLabel();
-            setStatus('active', 'Scanning... point camera at barcode');
+            setStatus('active', 'Point camera at barcode, then tap to scan');
             dbg('ZXing engine live');
         }).catch(function(err) {
             dbg('ZXing error: ' + err.message);
