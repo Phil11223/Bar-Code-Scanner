@@ -561,9 +561,7 @@
             // videoWidth is 0 until hardware delivers the first real frame.
             // Once ready: show the viewfinder and wait — scan loop does NOT start.
             // nativeScanFrame() is called only from onTap, never automatically.
-            var waitStart = Date.now();
             function waitForFrames() {
-                dbg('waitForFrames: videoWidth=' + video.videoWidth + ' t=' + (Date.now()-waitStart) + 'ms');
                 if (video.videoWidth > 0) {
                     video.style.opacity = '0.99';
                     requestAnimationFrame(function() {
@@ -685,15 +683,14 @@
         // Returns a Promise that resolves when scanning STARTS (not when it stops).
         zxReader.decodeFromVideoDevice(null, 'camVideo', function(result, err) {
             if (!result)     return;   // err fires on every non-decoded frame — ignore
-            dbg('ZXing cb: result=' + !!result + ' tapPending=' + tapPending + ' code=' + (result ? result.getText() : '-'));
             if (!tapPending) return;   // tap gate — only accept a result after a tap
+            // Only log when tapPending is true (i.e. user has tapped and we're actively trying)
+            dbg('ZXing cb: tapPending=true code=' + result.getText());
 
             var code    = result.getText();
             var fmt     = result.getBarcodeFormat();
             var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
             var now     = Date.now();
-            // Log raw value BEFORE any filter so we can see partial/garbled reads
-            dbg('ZXing RAW: [' + code + '] fmt=' + fmtName + ' len=' + (code ? code.length : 0));
             if (!code || code.length < 3) return;
             if (code === lastCode && (now - lastTime) < COOLDOWN) {
                 dbg('ZXing COOLDOWN blocked: [' + code + ']');
