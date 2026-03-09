@@ -497,10 +497,7 @@
     var nativeLoop     = null;   // rAF handle
 
     // ZXing path (desktop):
-    var zxReader = null;         // BrowserMultiFormatReader instance
-    var zxStream = null;         // MediaStream — we own it, same as native path
-    var zxLoop   = null;         // rAF handle for the decode loop
-    var zxCanvas = null;         // offscreen canvas for frame capture
+    var zxReader = null;         // BrowserMultiFormatReader (manages its own stream)
 
     // ── startScanner ─────────────────────────────────────────────────────────
     // Routes to the correct engine based on device capability.
@@ -584,9 +581,8 @@
         tapTimer   = null;
         tapPending = false;
         tapSession++;              // invalidates any in-flight detect() from this tap
-        // Cancel any scheduled rAF frame (native or ZXing path)
+        // Cancel any scheduled native rAF frame
         if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
-        if (zxLoop)     { cancelAnimationFrame(zxLoop);     zxLoop     = null; }
         setStatus('active', 'No barcode found — tap again to retry');
         dbg('Tap timeout — no barcode found, waiting for next tap');
         // Clear the "no barcode" message after 2s and go back to normal prompt
@@ -646,110 +642,48 @@
     }
 
     // ── startZXing (desktop) ──────────────────────────────────────────────────
-    // We own the MediaStream (same pattern as native path) so we have full
-    // control over teardown. Decoding is done manually via an offscreen canvas
-    // + zxReader.decodeFromCanvas() — called only from onTap, never auto-started.
-    // This mirrors nativeScanFrame exactly, just using ZXing instead of BarcodeDetector.
+    // Uses ZXing's decodeFromVideoDevice which manages its own stream.
+    // TRY_HARDER is needed for dense/small barcodes.
+    // The tapPending gate in the callback controls when results are accepted.
     function startZXing() {
         var hints = new Map();
         hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
         zxReader = new ZXing.BrowserMultiFormatReader(hints);
 
-        // Create a hidden canvas for frame capture — reused every decode attempt
-        zxCanvas = document.createElement('canvas');
+        zxReader.decodeFromVideoDevice(null, 'camVideo', function(result, err) {
+            if (!result)     return;  // err fires on every no-decode frame — ignore
+            if (!tapPending) return;  // tap gate — only commit after user taps
 
-        navigator.mediaDevices.getUserMedia({
-            audio: false,
-            video: { facingMode: { ideal: 'environment' },
-                     width: { ideal: 1280 }, height: { ideal: 720 } }
-        }).then(function(stream) {
-            zxStream = stream;
-            var video = document.getElementById('camVideo');
-            video.srcObject = stream;
-            video.play();
+            var code    = result.getText();
+            var fmt     = result.getBarcodeFormat();
+            var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
+            var now     = Date.now();
+            if (!code || code.length < 3) return;
+            if (code === lastCode && (now - lastTime) < COOLDOWN) return;
 
-            // Wait for first real frame before declaring ready
-            function waitForFrames() {
-                if (video.videoWidth > 0) {
-                    video.style.opacity = '0.99';
-                    requestAnimationFrame(function() {
-                        video.style.opacity = '1';
-                        // Size the canvas to match the video
-                        zxCanvas.width  = video.videoWidth;
-                        zxCanvas.height = video.videoHeight;
-                        scanning = true;
-                        document.getElementById('tap-hint').style.display = 'block';
-                        updateScanLabel();
-                        setStatus('active', 'Point camera at barcode, then tap to scan');
-                        dbg('ZXing camera ready — waiting for tap');
-                    });
-                } else {
-                    requestAnimationFrame(waitForFrames);
-                }
-            }
-            requestAnimationFrame(waitForFrames);
-
+            cancelTapTimeout();
+            tapPending = false;
+            tapSession++;
+            dbg('ZXing FOUND: ' + code + ' (' + fmtName + ')');
+            lastCode = code; lastTime = now;
+            commitScan(code, fmtName);
+        }).then(function() {
+            scanning = true;
+            document.getElementById('tap-hint').style.display = 'block';
+            updateScanLabel();
+            setStatus('active', 'Point camera at barcode, then tap to scan');
+            dbg('ZXing engine live — waiting for tap');
         }).catch(function(err) {
-            dbg('ZXing camera error: ' + err.message);
+            dbg('ZXing error: ' + err.message);
             setStatus('error', 'Camera error: ' + err.message);
             document.getElementById('startBtn').style.display = '';
             document.getElementById('stopBtn').style.display  = 'none';
         });
     }
 
-    // ── zxScanFrame ───────────────────────────────────────────────────────────
-    // Canvas-based decode loop — mirrors nativeScanFrame exactly.
-    // Started ONLY from onTap. Draws the current video frame to an offscreen
-    // canvas and asks ZXing to decode it. Loops until barcode found or timeout.
-    function zxScanFrame() {
-        if (!scanning || !tapPending) return;
-        var video = document.getElementById('camVideo');
-        var mySession = tapSession;
-
-        if (video.readyState >= 2 && video.videoWidth > 0) {
-            // Draw current video frame onto the canvas
-            var ctx = zxCanvas.getContext('2d');
-            ctx.drawImage(video, 0, 0, zxCanvas.width, zxCanvas.height);
-
-            // decodeFromCanvas is synchronous — wrap in try/catch (throws on no-find)
-            var result = null;
-            try { result = zxReader.decodeFromCanvas(zxCanvas); } catch(e) {}
-
-            if (result && mySession === tapSession) {
-                var code    = result.getText();
-                var fmt     = result.getBarcodeFormat();
-                var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
-                var now     = Date.now();
-                if (code && code.length >= 3 &&
-                    !(code === lastCode && (now - lastTime) < COOLDOWN)) {
-                    cancelTapTimeout();
-                    tapPending = false;
-                    tapSession++;
-                    dbg('ZXing FOUND: ' + code + ' (' + fmtName + ')');
-                    lastCode = code; lastTime = now;
-                    commitScan(code, fmtName);
-                    return;  // stop — wait for next tap
-                }
-            }
-
-            // Not found this frame — reschedule if session still active
-            if (scanning && tapPending && mySession === tapSession) {
-                zxLoop = requestAnimationFrame(zxScanFrame);
-            }
-        } else {
-            if (scanning && tapPending && mySession === tapSession) {
-                zxLoop = requestAnimationFrame(zxScanFrame);
-            }
-        }
-    }
-
     // ── stopZXing ─────────────────────────────────────────────────────────────
     function stopZXing() {
-        if (zxLoop)   { cancelAnimationFrame(zxLoop); zxLoop = null; }
-        if (zxStream) { zxStream.getTracks().forEach(function(t){ t.stop(); }); zxStream = null; }
-        document.getElementById('camVideo').srcObject = null;
         if (zxReader) { zxReader.reset(); zxReader = null; }
-        zxCanvas = null;
     }
 
     // ── stopScanner ───────────────────────────────────────────────────────────
@@ -1027,11 +961,9 @@
                 // Cancel any previous loop handle before starting fresh
                 if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
                 nativeScanFrame();
-            } else {
-                // Desktop ZXing path — same pattern as native
-                if (zxLoop) { cancelAnimationFrame(zxLoop); zxLoop = null; }
-                zxScanFrame();
             }
+            // ZXing (desktop): decodeFromVideoDevice runs its own loop —
+            // tapPending gate in the callback handles accepting/rejecting results
         }
         container.addEventListener('click',    onTap);
         container.addEventListener('touchend', onTap, { passive: true });
