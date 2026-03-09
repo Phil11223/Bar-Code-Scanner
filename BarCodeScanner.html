@@ -951,10 +951,10 @@
             setStatus('active', 'Scanning...');
             dbg('TAP registered — session=' + tapSession + ' engine=' + (useNative ? 'native' : 'ZXing'));
 
-            // ── 3-second timeout ──────────────────────────────────────────────
-            // Code 128 alphanumeric barcodes + camera autofocus need ~1-2s.
-            // 3s gives enough headroom without feeling stuck.
-            tapTimer = setTimeout(resetTapGate, 5000);
+            // No timeout — tapPending stays open until ZXing finds a barcode.
+            // A new tap cancels the current session via tapSession++, so stale
+            // results are always discarded safely.
+            // tapTimer = setTimeout(resetTapGate, ...);  // disabled
 
             if (useNative) {
                 // Cancel any previous loop handle before starting fresh
@@ -964,8 +964,18 @@
             // ZXing (desktop): decodeFromVideoDevice runs its own loop —
             // tapPending gate in the callback handles accepting/rejecting results
         }
-        container.addEventListener('click',    onTap);
-        container.addEventListener('touchend', onTap, { passive: true });
+        // On mobile, touchend fires then ~300ms later a ghost click fires too.
+        // We use a flag to swallow that ghost click so each physical tap = 1 session.
+        var lastTouchEnd = 0;
+        container.addEventListener('touchend', function(e) {
+            lastTouchEnd = Date.now();
+            onTap(e);
+        });
+        container.addEventListener('click', function(e) {
+            // If a touchend fired within the last 500ms this is a ghost click — ignore it
+            if (Date.now() - lastTouchEnd < 500) return;
+            onTap(e);
+        });
 
         // Close hamburger menu when clicking outside it
         document.addEventListener('click', function(e) {
