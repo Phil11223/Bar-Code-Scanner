@@ -647,6 +647,7 @@
         // Returns a Promise that resolves when scanning STARTS (not when it stops).
         zxReader.decodeFromVideoDevice(null, 'camVideo', function(result, err) {
             if (!result)     return;   // err fires on every non-decoded frame — ignore
+            dbg('ZXing cb: result=' + !!result + ' tapPending=' + tapPending + ' code=' + (result ? result.getText() : '-'));
             if (!tapPending) return;   // tap gate — only accept a result after a tap
 
             var code    = result.getText();
@@ -654,7 +655,10 @@
             var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
             var now     = Date.now();
             if (!code || code.length < 3) return;
-            if (code === lastCode && (now - lastTime) < COOLDOWN) return;
+            if (code === lastCode && (now - lastTime) < COOLDOWN) {
+                dbg('ZXing COOLDOWN blocked: ' + code);
+                return;
+            }
             cancelTapTimeout();
             tapPending = false;
             tapSession++;
@@ -945,10 +949,12 @@
             tapSession++;          // new session — kills any stale in-flight detects
             tapPending = true;
             setStatus('active', 'Scanning...');
+            dbg('TAP registered — session=' + tapSession + ' engine=' + (useNative ? 'native' : 'ZXing'));
 
-            // ── 1-second timeout ──────────────────────────────────────────────
-            // If no barcode found within 1s, reset and wait for next tap.
-            tapTimer = setTimeout(resetTapGate, 1000);
+            // ── 3-second timeout ──────────────────────────────────────────────
+            // Code 128 alphanumeric barcodes + camera autofocus need ~1-2s.
+            // 3s gives enough headroom without feeling stuck.
+            tapTimer = setTimeout(resetTapGate, 5000);
 
             if (useNative) {
                 // Cancel any previous loop handle before starting fresh
