@@ -1009,9 +1009,10 @@
             // Mark container so CSS turns the scan line red for the 2s window
             document.getElementById('scanner-container').classList.add('scanning-active');
 
-            // 2s timeout — if nothing found, cancel and return to standby.
+            // 4s timeout — gives dense Code 128 barcodes enough attempts to resolve.
+            // EAN-13 locks in milliseconds; Code 128 narrow bars can need 2-3s.
             // A new tap resets the timer via cancelTapTimeout() above.
-            tapTimer = setTimeout(resetTapGate, 2000);
+            tapTimer = setTimeout(resetTapGate, 4000);
 
             if (useNative) {
                 // Cancel any previous loop handle before starting fresh
