@@ -615,16 +615,41 @@
 
         if (video.readyState >= 2 && video.videoWidth > 0) {
             // ── Crop to center box using createImageBitmap ────────────────────
-            // The scan overlay is 92% wide × 38% tall, centered in the video.
-            // createImageBitmap(source, x, y, w, h) does the crop at GPU level
-            // and returns an ImageBitmap — a valid BarcodeDetector input type.
-            // This stops barcodes outside the box from being detected.
-            var vw    = video.videoWidth;
-            var vh    = video.videoHeight;
-            var cropW = Math.round(vw * 0.92);
-            var cropH = Math.round(vh * 0.38);
-            var cropX = Math.round((vw - cropW) / 2);
-            var cropY = Math.round((vh - cropH) / 2);
+            // The scan overlay is 92% wide × 38% tall of the *container*, not
+            // the raw video frame. With object-fit:cover the video is scaled by
+            // height to fill the 4:3 container, clipping the sides of the 16:9
+            // frame. We must account for that clip before computing crop coords.
+            //
+            // Example with 1280×720 video in 4:3 container:
+            //   Visible width in video pixels = 720 × (4/3) = 960px
+            //   Clipped left/right = (1280 - 960) / 2 = 160px each side
+            //   cropX = 160 + (960 - 883) / 2 = 198  (NOT 51)
+            var vw = video.videoWidth;
+            var vh = video.videoHeight;
+            var containerAspect = 4 / 3;  // matches #scanner-container CSS aspect-ratio
+            var videoAspect = vw / vh;
+
+            // Determine which dimension object-fit:cover scales by
+            var visibleW, visibleH, offsetX, offsetY;
+            if (videoAspect > containerAspect) {
+                // Video is wider than container → scale by height, clip left+right
+                visibleH = vh;
+                visibleW = vh * containerAspect;
+                offsetX  = (vw - visibleW) / 2;
+                offsetY  = 0;
+            } else {
+                // Video is taller than container → scale by width, clip top+bottom
+                visibleW = vw;
+                visibleH = vw / containerAspect;
+                offsetX  = 0;
+                offsetY  = (vh - visibleH) / 2;
+            }
+
+            // Overlay: 92% wide × 38% tall of the visible region, centered
+            var cropW = Math.round(visibleW * 0.92);
+            var cropH = Math.round(visibleH * 0.38);
+            var cropX = Math.round(offsetX + (visibleW - cropW) / 2);
+            var cropY = Math.round(offsetY + (visibleH - cropH) / 2);
 
             createImageBitmap(video, cropX, cropY, cropW, cropH)
             .then(function(bitmap) {
