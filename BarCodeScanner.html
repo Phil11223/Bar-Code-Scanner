@@ -137,7 +137,7 @@
         .scan-overlay {
             position: absolute; top: 50%; left: 50%;
             transform: translate(-50%, -50%);
-            width: 96%; height: 20%;
+            width: 92%; height: 20%;
             border: 2px solid #4cc9f0; border-radius: 6px;
             box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);
             z-index: 10; pointer-events: none;
@@ -510,10 +510,11 @@
     // useNative = true  → mobile path: BarcodeDetector rAF loop (OS-level chip)
     // useNative = false → desktop path: ZXing decodeFromVideoDevice (manages stream)
     var isMobile  = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-    // Only use BarcodeDetector on MOBILE — desktop Chrome exposes the API too
-    // but it's unreliable there; ZXing is the correct engine for desktop.
-    var useNative = isMobile && (typeof BarcodeDetector !== 'undefined');
-    console.log('Device: ' + (isMobile ? 'mobile' : 'desktop') + ' | engine: ' + (useNative ? 'BarcodeDetector' : 'ZXing'));
+    // ZXing is used on ALL platforms — BarcodeDetector produced unreliable
+    // results on Android (wrong barcodes, truncated reads). ZXing is consistent
+    // across Chrome and Firefox on both mobile and desktop.
+    var useNative = false;
+    console.log('Device: ' + (isMobile ? 'mobile' : 'desktop') + ' | engine: ZXing (forced)');
 
     // ── Engine state ──────────────────────────────────────────────────────────
     // Native path (BarcodeDetector):
@@ -840,9 +841,8 @@
                         video.style.opacity = '1';
                         // Size canvas to the crop region once — reused every frame.
                         // 92% wide × 20% tall matches the visual overlay box exactly.
-                        // Canvas sized to match the .scan-overlay box (96% × 20%)
-                        // so ZXing sees exactly the same region the user sees
-                        zxCanvas.width  = Math.round(video.videoWidth  * 0.96);
+                        // Canvas sized to match the .scan-overlay box (92% × 20%)
+                        zxCanvas.width  = Math.round(video.videoWidth  * 0.92);
                         zxCanvas.height = Math.round(video.videoHeight * 0.20);
                         scanning = true;
                         document.getElementById('tap-hint').style.display = 'block';
