@@ -507,6 +507,7 @@
     // Routes to the correct engine based on device capability.
     function startScanner() {
         dbg('startScanner() → ' + (useNative ? 'BarcodeDetector' : 'ZXing'));
+        dbg('isMobile=' + isMobile + ' | BarcodeDetector=' + (typeof BarcodeDetector !== 'undefined'));
         setStatus('loading', 'Starting camera...');
         document.getElementById('startBtn').style.display = 'none';
         document.getElementById('stopBtn').style.display  = '';
