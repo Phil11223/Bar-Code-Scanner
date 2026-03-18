@@ -137,7 +137,7 @@
         .scan-overlay {
             position: absolute; top: 50%; left: 50%;
             transform: translate(-50%, -50%);
-            width: 92%; height: 20%;
+            width: 92%; height: 38%;
             border: 2px solid #4cc9f0; border-radius: 6px;
             box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);
             z-index: 10; pointer-events: none;
@@ -443,27 +443,11 @@
     </div>
 </div>
 
-<!-- ── Debug panel ─────────────────────────────────────────────────────────── -->
-<div style="width:100%;max-width:600px;margin-bottom:8px;text-align:right;">
-    <button id="dbg-toggle"
-            onclick="(function(){
-                var p   = document.getElementById('dbg-panel-body');
-                var btn = document.getElementById('dbg-toggle');
-                var hidden = p.style.display === 'none';
-                p.style.display  = hidden ? 'block' : 'none';
-                btn.textContent  = hidden ? '🔍 Hide Debug Log' : '🔍 Show Debug Log';
-            })()"
-            style="background:transparent;border:1px solid #4cc9f0;color:#4cc9f0;
-                   border-radius:6px;padding:4px 12px;font-size:0.75rem;cursor:pointer;">
-        🔍 Show Debug Log
-    </button>
-</div>
+<!-- ── Debug panel (remove once scanning works) ──────────────────────────── -->
 <div id="debug-panel" style="width:100%;max-width:600px;background:#0d0d1a;border:1px solid #4cc9f0;
      border-radius:10px;padding:12px;margin-bottom:16px;font-family:monospace;font-size:0.75rem;color:#0f0;">
     <div style="color:#4cc9f0;margin-bottom:6px;font-weight:bold;">🔍 Debug Panel</div>
-    <div id="dbg-panel-body" style="display:none;">
-        <div id="dbg-info">Loading...</div>
-    </div>
+    <div id="dbg-info">Loading...</div>
 </div>
 
 <script>
@@ -517,17 +501,12 @@
     var nativeLoop     = null;   // rAF handle
 
     // ZXing path (desktop):
-    var zxReader   = null;   // BrowserMultiFormatReader instance
-    var zxStream   = null;   // MediaStream we own — must stop() on teardown
-    var zxLoop     = null;   // rAF handle for zxScanFrame
-    var zxCanvas   = null;   // offscreen canvas for crop — never in DOM
-    var zxDecoding = false;  // true while a decodeFromImageUrl promise is in-flight
+    var zxReader = null;         // BrowserMultiFormatReader (manages its own stream)
 
     // ── startScanner ─────────────────────────────────────────────────────────
     // Routes to the correct engine based on device capability.
     function startScanner() {
         dbg('startScanner() → ' + (useNative ? 'BarcodeDetector' : 'ZXing'));
-        dbg('isMobile=' + isMobile + ' | BarcodeDetector=' + (typeof BarcodeDetector !== 'undefined'));
         setStatus('loading', 'Starting camera...');
         document.getElementById('startBtn').style.display = 'none';
         document.getElementById('stopBtn').style.display  = '';
@@ -581,7 +560,6 @@
                     requestAnimationFrame(function() {
                         video.style.opacity = '1';
                         scanning = true;
-                        dbg('Camera ready: ' + video.videoWidth + '×' + video.videoHeight);
                         if (isMobile) document.getElementById('torch-btn').style.display = 'flex';
                         document.getElementById('tap-hint').style.display = 'block';
                         updateScanLabel();
@@ -616,7 +594,6 @@
         tapSession++;              // invalidates any in-flight detect() from this tap
         // Cancel any scheduled native rAF frame
         if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
-        if (zxLoop)     { cancelAnimationFrame(zxLoop);     zxLoop = null; }
         // Line back to default colour — scanning window closed
         document.getElementById('scanner-container').classList.remove('scanning-active');
         setStatus('active', 'Point camera at barcode, then tap to scan');
@@ -643,15 +620,9 @@
             var vw    = video.videoWidth;
             var vh    = video.videoHeight;
             var cropW = Math.round(vw * 0.92);
-            var cropH = Math.round(vh * 0.20);
+            var cropH = Math.round(vh * 0.38);
             var cropX = Math.round((vw - cropW) / 2);
             var cropY = Math.round((vh - cropH) / 2);
-
-            // ── One-time log — fires once per tap session, not per frame ──────
-            if (!nativeScanFrame._cropLogged) {
-                nativeScanFrame._cropLogged = true;
-                dbg('video: ' + vw + '×' + vh + ' | crop: x=' + cropX + ' y=' + cropY + ' w=' + cropW + ' h=' + cropH);
-            }
 
             createImageBitmap(video, cropX, cropY, cropW, cropH)
             .then(function(bitmap) {
@@ -698,12 +669,15 @@
         nativeDetector = null;
     }
 
-    // ── startZXing ────────────────────────────────────────────────────────────
-    // We own the MediaStream so we control exactly what gets decoded.
-    // On each tap, zxScanFrame() draws only the center-box crop to an offscreen
-    // canvas, converts it to a data URL, and passes that to decodeFromImageUrl()
-    // — ZXing physically only sees the cropped pixels, not the full frame.
+    // ── startZXing (desktop) ──────────────────────────────────────────────────
+    // ZXing's decodeFromVideoDevice manages its own getUserMedia stream and video
+    // element. It fires the callback on every successful decode — no canvas loop
+    // or setInterval needed. We just handle results in the callback.
     function startZXing() {
+        // ── Guard: ZXing library must be loaded from CDN ─────────────────────
+        // If unpkg CDN failed (network error, timeout) window.ZXing is undefined.
+        // Without this check the constructor throws a silent ReferenceError and
+        // the UI freezes with the Stop button showing but no camera feed.
         if (typeof ZXing === 'undefined') {
             dbg('ERROR: ZXing library not loaded — check CDN / network');
             setStatus('error', 'Library failed to load. Refresh the page.');
@@ -712,141 +686,51 @@
             return;
         }
 
+        // Plain constructor — no hints, no custom interval.
+        // Confirmed working baseline for ZXing 0.21.3.
         zxReader = new ZXing.BrowserMultiFormatReader();
-        zxCanvas = document.createElement('canvas');
 
-        navigator.mediaDevices.getUserMedia({
-            audio: false,
-            video: { facingMode: { ideal: 'environment' },
-                     width: { ideal: 1280 }, height: { ideal: 720 } }
-        }).then(function(stream) {
-            zxStream = stream;
+        // decodeFromVideoDevice: null deviceId = default camera
+        // Returns a Promise that resolves when scanning STARTS (not when it stops).
+        zxReader.decodeFromVideoDevice(null, 'camVideo', function(result, err) {
+            if (!result)     return;   // err fires on every non-decoded frame — ignore
+            if (!tapPending) return;   // tap gate — only accept a result after a tap
+            // Only log when tapPending is true (i.e. user has tapped and we're actively trying)
+            dbg('ZXing cb: tapPending=true code=' + result.getText());
 
-            // ── Autofocus ─────────────────────────────────────────────────────
-            var track = stream.getVideoTracks()[0];
-            dbg('Camera: ' + (track ? track.label : 'no track'));
-            if (track && track.applyConstraints) {
-                track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] })
-                    .catch(function(){});
-            }
-
-            var video = document.getElementById('camVideo');
-            video.srcObject = stream;
-            video.play();
-
-            // ── Wait for first real frame ──────────────────────────────────────
-            function waitForFrames() {
-                if (video.videoWidth > 0) {
-                    video.style.opacity = '0.99';
-                    requestAnimationFrame(function() {
-                        video.style.opacity = '1';
-                        // Size canvas to the crop region once — reused every frame.
-                        // 92% wide × 20% tall matches the visual overlay box exactly.
-                        zxCanvas.width  = Math.round(video.videoWidth  * 0.92);
-                        zxCanvas.height = Math.round(video.videoHeight * 0.20);
-                        scanning = true;
-                        document.getElementById('tap-hint').style.display = 'block';
-                        updateScanLabel();
-                        setStatus('active', 'Point camera at barcode, then tap to scan');
-                        dbg('ZXing ready — video: ' + video.videoWidth + 'x' + video.videoHeight + ' crop: ' + zxCanvas.width + 'x' + zxCanvas.height);
-                    });
-                } else {
-                    requestAnimationFrame(waitForFrames);
-                }
-            }
-            requestAnimationFrame(waitForFrames);
-
-        }).catch(function(err) {
-            dbg('Camera error: ' + err.message);
-            setStatus('error', 'Camera error: ' + err.message);
-            document.getElementById('startBtn').style.display = '';
-            document.getElementById('stopBtn').style.display  = 'none';
-        });
-    }
-
-    // ── zxScanFrame ───────────────────────────────────────────────────────────
-    // Called only from onTap. Draws the center-box crop to canvas, converts to
-    // a data URL, then asks ZXing to decode just those pixels.
-    //
-    // decodeFromImageUrl is async — we wait for each promise before scheduling
-    // the next frame. This prevents a backlog of queued decode calls.
-    // Think of it like a photo-booth: snap → develop → look → snap → develop...
-    function zxScanFrame() {
-        if (!scanning || !tapPending) return;
-        var video = document.getElementById('camVideo');
-        var mySession = tapSession;
-        if (video.readyState < 2 || video.videoWidth === 0) {
-            // Video not ready yet — retry next frame
-            if (scanning && tapPending && mySession === tapSession) {
-                zxLoop = requestAnimationFrame(zxScanFrame);
-            }
-            return;
-        }
-
-        // ── Draw only the center-box region onto the offscreen canvas ──────────
-        // Source: center 92%×20% of raw video frame
-        // Destination: fills the canvas (already sized to cropW×cropH at startup)
-        var vw    = video.videoWidth;
-        var vh    = video.videoHeight;
-        var cropW = zxCanvas.width;
-        var cropH = zxCanvas.height;
-        var cropX = Math.round((vw - cropW) / 2);
-        var cropY = Math.round((vh - cropH) / 2);
-
-        // One-time log per tap — not per frame
-        if (!zxScanFrame._logged) {
-            zxScanFrame._logged = true;
-            dbg('ZXing crop: video=' + vw + 'x' + vh + ' cropX=' + cropX + ' cropY=' + cropY + ' cropW=' + cropW + ' cropH=' + cropH);
-        }
-        var ctx   = zxCanvas.getContext('2d');
-        ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-
-        // ── Convert crop to data URL and decode ───────────────────────────────
-        // ZXing only sees the cropped pixels — full frame never reaches the decoder
-        var dataUrl = zxCanvas.toDataURL('image/jpeg', 0.85);
-        zxDecoding  = true;
-
-        zxReader.decodeFromImageUrl(dataUrl)
-        .then(function(result) {
-            zxDecoding = false;
-            if (!result || mySession !== tapSession || !tapPending) return;
             var code    = result.getText();
-            dbg('ZXing crop decoded: ' + code);  // confirms what's in the crop region
             var fmt     = result.getBarcodeFormat();
             var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
             var now     = Date.now();
             if (!code || code.length < 3) return;
-            if (code === lastCode && (now - lastTime) < COOLDOWN) return;
-            // ── Valid barcode found — commit and stop loop ────────────────────
+            if (code === lastCode && (now - lastTime) < COOLDOWN) {
+                dbg('ZXing COOLDOWN blocked: [' + code + ']');
+                return;
+            }
             cancelTapTimeout();
             tapPending = false;
             tapSession++;
             dbg('ZXing FOUND: ' + code + ' (' + fmtName + ')');
             lastCode = code; lastTime = now;
             commitScan(code, fmtName);
-        })
-        .catch(function() {
-            // No barcode in this frame — normal, not an error
-            zxDecoding = false;
-        })
-        .finally(function() {
-            // Schedule next frame only if session still active
-            if (scanning && tapPending && mySession === tapSession) {
-                zxLoop = requestAnimationFrame(zxScanFrame);
-            }
+        }).then(function() {
+            scanning = true;
+            document.getElementById('tap-hint').style.display = 'block';
+            updateScanLabel();
+            setStatus('active', 'Scanning... point camera at barcode');
+            dbg('ZXing engine live');
+        }).catch(function(err) {
+            dbg('ZXing error: ' + err.message);
+            setStatus('error', 'Camera error: ' + err.message);
+            document.getElementById('startBtn').style.display = '';
+            document.getElementById('stopBtn').style.display  = 'none';
         });
     }
 
     // ── stopZXing ─────────────────────────────────────────────────────────────
     function stopZXing() {
-        if (zxLoop)   { cancelAnimationFrame(zxLoop); zxLoop = null; }
-        if (zxStream) { zxStream.getTracks().forEach(function(t){ t.stop(); }); zxStream = null; }
-        document.getElementById('camVideo').srcObject = null;
         if (zxReader) { zxReader.reset(); zxReader = null; }
-        zxCanvas   = null;
-        zxDecoding = false;
     }
-
 
     // ── stopScanner ───────────────────────────────────────────────────────────
     // Routes teardown to the correct engine, then resets shared UI state.
@@ -1123,21 +1007,17 @@
             // Mark container so CSS turns the scan line red for the 2s window
             document.getElementById('scanner-container').classList.add('scanning-active');
 
-            // 5s timeout — ZXing's internal scan rate on mobile can be slow.
+            // 2s timeout — if nothing found, cancel and return to standby.
             // A new tap resets the timer via cancelTapTimeout() above.
-            tapTimer = setTimeout(resetTapGate, 5000);
+            tapTimer = setTimeout(resetTapGate, 2000);
 
             if (useNative) {
                 // Cancel any previous loop handle before starting fresh
-                nativeScanFrame._cropLogged = false;
                 if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
                 nativeScanFrame();
-            } else {
-                // ZXing: cancel any stale loop and kick off fresh crop-decode rAF loop
-                zxScanFrame._logged = false;
-                if (zxLoop) { cancelAnimationFrame(zxLoop); zxLoop = null; }
-                zxScanFrame();
             }
+            // ZXing (desktop): decodeFromVideoDevice runs its own loop —
+            // tapPending gate in the callback handles accepting/rejecting results
         }
         // On mobile, touchend fires then ~300ms later a ghost click fires too.
         // We use a flag to swallow that ghost click so each physical tap = 1 session.
