@@ -137,7 +137,7 @@
         .scan-overlay {
             position: absolute; top: 50%; left: 50%;
             transform: translate(-50%, -50%);
-            width: 92%; height: 38%;
+            width: 92%; height: 20%;
             border: 2px solid #4cc9f0; border-radius: 6px;
             box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);
             z-index: 10; pointer-events: none;
@@ -560,6 +560,7 @@
                     requestAnimationFrame(function() {
                         video.style.opacity = '1';
                         scanning = true;
+                        dbg('Camera ready: ' + video.videoWidth + '×' + video.videoHeight);
                         if (isMobile) document.getElementById('torch-btn').style.display = 'flex';
                         document.getElementById('tap-hint').style.display = 'block';
                         updateScanLabel();
@@ -620,7 +621,7 @@
             var vw    = video.videoWidth;
             var vh    = video.videoHeight;
             var cropW = Math.round(vw * 0.92);
-            var cropH = Math.round(vh * 0.38);
+            var cropH = Math.round(vh * 0.20);
             var cropX = Math.round((vw - cropW) / 2);
             var cropY = Math.round((vh - cropH) / 2);
 
