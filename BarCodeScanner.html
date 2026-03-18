@@ -476,12 +476,12 @@
     var records     = [];
     var scanning    = false;
     var tapPending  = false;   // true = user has tapped, one scan allowed
-    var tapTimer    = null;    // setTimeout handle — cancels scan attempt after 1s
-    var tapSession  = 0;        // increments each tap — invalidates in-flight detect() calls
+    var tapTimer    = null;    // setTimeout handle — cancels scan attempt after 5s
+    var tapSession  = 0;       // increments each tap — invalidates in-flight detect() calls
     var bannerTimer = null;
     var lastCode    = '';
     var lastTime    = 0;
-        var COOLDOWN    = 3000;
+    var COOLDOWN    = 3000;
 
     // ── Multi-scan state ──────────────────────────────────────────────────────
     // multiScan: feature toggle from the dropdown menu
@@ -493,7 +493,7 @@
     var rescanTarget = null;
 
     // ── Rename popup state ────────────────────────────────────────────────────
-    var renameCol    = null;   // which col key is being renamed: 'value' or 'item'
+    var renameCol     = null;   // which col key is being renamed: 'value' or 'item'
     var renameInputEl = null;
 
     // ── On-screen debug helper ────────────────────────────────────────────────
@@ -521,7 +521,7 @@
     var nativeStream   = null;   // MediaStream (we own it — must stop() on teardown)
     var nativeLoop     = null;   // rAF handle
 
-    // ZXing path (desktop):
+    // ZXing path (desktop / Firefox):
     var zxReader   = null;   // BrowserMultiFormatReader instance
     var zxStream   = null;   // MediaStream we own — must stop() on teardown
     var zxLoop     = null;   // rAF handle for zxScanFrame
@@ -542,14 +542,13 @@
     // ── startNative (mobile / BarcodeDetector) ────────────────────────────────
     // Uses the OS-level barcode chip via BarcodeDetector API.
     // We own the MediaStream → must stop() it ourselves on teardown.
-    // rAF loop: detect(videoElement) every frame — no canvas needed.
     function startNative() {
         // ── Guard: BarcodeDetector constructor ───────────────────────────────
         try {
-        nativeDetector = new BarcodeDetector({
-            formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39',
-                      'code_93','codabar','itf','qr_code','data_matrix','pdf417','aztec']
-        });
+            nativeDetector = new BarcodeDetector({
+                formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39',
+                          'code_93','codabar','itf','qr_code','data_matrix','pdf417','aztec']
+            });
         } catch(e) {
             dbg('ERROR: BarcodeDetector constructor failed — ' + e.message);
             setStatus('error', 'Scanner init failed: ' + e.message);
@@ -557,6 +556,7 @@
             document.getElementById('stopBtn').style.display  = 'none';
             return;
         }
+
         navigator.mediaDevices.getUserMedia({
             audio: false,
             video: { facingMode: { ideal: 'environment' },
@@ -578,8 +578,7 @@
 
             // ── Wait for first real frame, then declare camera ready ──────────
             // videoWidth is 0 until the hardware delivers a real frame.
-            // scanning = true only after the first frame arrives — this is what
-            // allows onTap to proceed.
+            // scanning = true only after the first frame arrives.
             function waitForFrames() {
                 if (video.videoWidth > 0) {
                     video.style.opacity = '0.99';
@@ -607,9 +606,82 @@
         });
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // ── getScanCropInVideoSpace  (BarcodeDetector path ONLY) ────────────────
+    // ════════════════════════════════════════════════════════════════════════
+    // The scan-overlay box is positioned in screen/CSS pixels.
+    // The camera frame lives in its own pixel space (e.g. 1280×720).
+    // These two spaces NEVER match directly because object-fit:cover scales
+    // the video to fill the container and clips the overflow — so raw video
+    // pixel (0,0) may not even be visible on screen.
+    //
+    // Think of it like two maps at different scales:
+    //   Screen map:  the red box you see — positioned in CSS pixels
+    //   Camera map:  the raw frame       — positioned in video pixels
+    //
+    // This function converts the screen-space overlay rect into the
+    // equivalent region of the raw video frame, so createImageBitmap
+    // crops exactly the pixels that are visually behind the box.
+    //
+    // Steps:
+    //  1. Measure the video element's rendered size on screen
+    //  2. Get the actual camera frame size (videoWidth × videoHeight)
+    //  3. Compute the object-fit:cover scale: whichever axis needs the
+    //     LARGER scale wins — the other axis overflows and is clipped.
+    //     (Like stretching a photo until both edges reach the frame.)
+    //  4. Work out how many raw video pixels are hidden on each edge
+    //     (the video is centered, so overflow is split equally)
+    //  5. Get the overlay box position relative to the video element
+    //  6. Divide by scale + add hidden offset → raw video pixel coords
+    //
+    // ZXing path is COMPLETELY SEPARATE — this function is never called there.
+    // ════════════════════════════════════════════════════════════════════════
+    function getScanCropInVideoSpace(video, overlayEl) {
+        // Step 1: how large is the video element on screen right now?
+        var renderedRect = video.getBoundingClientRect();
+        var renderedW    = renderedRect.width;
+        var renderedH    = renderedRect.height;
+
+        // Step 2: actual camera frame dimensions
+        var videoW = video.videoWidth;
+        var videoH = video.videoHeight;
+
+        // Step 3: object-fit:cover scale factor
+        // cover = scale UP until the video fills the container on BOTH axes.
+        // The axis that needs the larger scale wins; the other axis overflows.
+        // Example: 1280×720 video (16:9) in a 600×450 container (4:3)
+        //   scaleW = 600/1280 = 0.469   scaleH = 450/720 = 0.625
+        //   cover picks 0.625 — height fills exactly, width overflows
+        var scale = Math.max(renderedW / videoW, renderedH / videoH);
+
+        // Step 4: how many raw video pixels are clipped (hidden) on each edge?
+        // The video is centered in the container, so overflow is split equally.
+        // hiddenVideoX: video pixels hidden to the LEFT (and symmetrically right)
+        // hiddenVideoY: video pixels hidden above   (and symmetrically below)
+        var hiddenVideoX = (videoW - renderedW / scale) / 2;
+        var hiddenVideoY = (videoH - renderedH / scale) / 2;
+
+        // Step 5: position of the scan-overlay box in screen pixels,
+        // measured relative to the video element's top-left corner
+        var boxRect = overlayEl.getBoundingClientRect();
+        var boxLeft = boxRect.left   - renderedRect.left;
+        var boxTop  = boxRect.top    - renderedRect.top;
+        var boxW    = boxRect.width;
+        var boxH    = boxRect.height;
+
+        // Step 6: convert screen coords → raw video pixel coords
+        // Divide by scale to undo the CSS zoom, then add the hidden offset
+        // to account for the clipped region that sits before pixel (0,0) on screen.
+        var cropX = Math.round(boxLeft / scale + hiddenVideoX);
+        var cropY = Math.round(boxTop  / scale + hiddenVideoY);
+        var cropW = Math.round(boxW    / scale);
+        var cropH = Math.round(boxH    / scale);
+
+        return { cropX: cropX, cropY: cropY, cropW: cropW, cropH: cropH };
+    }
 
     // ── Tap timeout helpers ──────────────────────────────────────────────────
-    // cancelTapTimeout: clears any running 1s timeout (called on success/stop).
+    // cancelTapTimeout: clears any running timeout (called on success/stop).
     // resetTapGate: called when timeout fires — cancels the scan loop and resets
     //               UI back to "waiting for tap" state without stopping the camera.
     function cancelTapTimeout() {
@@ -635,6 +707,7 @@
     function nativeScanFrame() {
         // Both guards must pass — camera active AND user has tapped
         if (!scanning || !tapPending) return;
+
         var video = document.getElementById('camVideo');
 
         // Capture session ID NOW — if resetTapGate fires while detect() is
@@ -642,28 +715,38 @@
         var mySession = tapSession;
 
         if (video.readyState >= 2 && video.videoWidth > 0) {
-            // ── Crop to center box using createImageBitmap ────────────────────
-            // 92% wide × 38% tall of the raw video frame, centered.
-            // createImageBitmap returns an ImageBitmap — valid BarcodeDetector input.
-            var vw    = video.videoWidth;
-            var vh    = video.videoHeight;
-            var cropW = Math.round(vw * 0.92);
-            var cropH = Math.round(vh * 0.20);
-            var cropX = Math.round((vw - cropW) / 2);
-            var cropY = Math.round((vh - cropH) / 2);
 
-            // ── One-time log — fires once per tap session, not per frame ──────
+            // ── Map scan-overlay box → raw video pixel coordinates ─────────────
+            // Uses getScanCropInVideoSpace() to account for object-fit:cover
+            // scaling. This replaces the old %-of-videoWidth approach which
+            // assumed screen space and video space were the same — they're not.
+            //
+            // The overlay box IS the visual scan window the user sees.
+            // We want to decode exactly those pixels, not a guess based on %.
+            var overlay = document.querySelector('.scan-overlay');
+            var crop    = getScanCropInVideoSpace(video, overlay);
+            var cropX   = crop.cropX;
+            var cropY   = crop.cropY;
+            var cropW   = crop.cropW;
+            var cropH   = crop.cropH;
+
+            // ── One-time log per tap session — not per frame ──────────────────
             if (!nativeScanFrame._cropLogged) {
                 nativeScanFrame._cropLogged = true;
-                dbg('video: ' + vw + '×' + vh + ' | crop: x=' + cropX + ' y=' + cropY + ' w=' + cropW + ' h=' + cropH);
+                dbg('video: ' + video.videoWidth + '×' + video.videoHeight +
+                    ' | crop: x=' + cropX + ' y=' + cropY +
+                    ' w=' + cropW + ' h=' + cropH);
             }
 
+            // createImageBitmap crops the raw frame to exactly the scan-window
+            // region. ImageBitmap is the only valid input type for detect() on
+            // Android — canvas and video element inputs silently return empty.
             createImageBitmap(video, cropX, cropY, cropW, cropH)
             .then(function(bitmap) {
                 return nativeDetector.detect(bitmap).then(function(barcodes) {
                     bitmap.close();   // free GPU memory immediately
 
-                    // Log only on count change — not per-frame
+                    // Log only on count change — not per frame
                     if (typeof nativeScanFrame._lastCount === 'undefined') nativeScanFrame._lastCount = -1;
                     if (barcodes.length !== nativeScanFrame._lastCount) {
                         nativeScanFrame._lastCount = barcodes.length;
@@ -682,13 +765,17 @@
                     lastCode = bc.rawValue; lastTime = now;
                     commitScan(bc.rawValue, bc.format);
                 });
-            }).catch(function(e){ dbg('detect ERROR: ' + e); }).finally(function() {
+            }).catch(function(e) {
+                dbg('detect ERROR: ' + e);
+            }).finally(function() {
                 // Reschedule only if this tap session is still active
                 if (scanning && tapPending && mySession === tapSession) {
                     nativeLoop = requestAnimationFrame(nativeScanFrame);
                 }
             });
+
         } else {
+            // Video not ready yet — retry next frame
             if (scanning && tapPending && mySession === tapSession) {
                 nativeLoop = requestAnimationFrame(nativeScanFrame);
             }
@@ -702,6 +789,12 @@
         document.getElementById('camVideo').srcObject = null;
         nativeDetector = null;
     }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // ── ZXing engine (desktop / Firefox) — UNCHANGED ────────────────────────
+    // ════════════════════════════════════════════════════════════════════════
+    // Nothing below this line in the ZXing section has been modified.
+    // getScanCropInVideoSpace() is never called here.
 
     // ── startZXing ────────────────────────────────────────────────────────────
     // We own the MediaStream so we control exactly what gets decoded.
@@ -803,7 +896,7 @@
             zxScanFrame._logged = true;
             dbg('ZXing crop: video=' + vw + 'x' + vh + ' cropX=' + cropX + ' cropY=' + cropY + ' cropW=' + cropW + ' cropH=' + cropH);
         }
-        var ctx   = zxCanvas.getContext('2d');
+        var ctx = zxCanvas.getContext('2d');
         ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
 
         // ── Convert crop to data URL and decode ───────────────────────────────
@@ -816,7 +909,7 @@
             zxDecoding = false;
             if (!result || mySession !== tapSession || !tapPending) return;
             var code    = result.getText();
-            dbg('ZXing crop decoded: ' + code);  // confirms what's in the crop region
+            dbg('ZXing crop decoded: ' + code);
             var fmt     = result.getBarcodeFormat();
             var fmtName = (ZXing.BarcodeFormat[fmt] || String(fmt)).toLowerCase();
             var now     = Date.now();
@@ -852,13 +945,12 @@
         zxDecoding = false;
     }
 
-
     // ── stopScanner ───────────────────────────────────────────────────────────
     // Routes teardown to the correct engine, then resets shared UI state.
     function stopScanner() {
         scanning   = false;
         cancelTapTimeout();
-        tapPending = false;   // clear gate so next session starts clean
+        tapPending = false;
         document.getElementById('scanner-container').classList.remove('scanning-active');
         if (useNative) { stopNative(); } else { stopZXing(); }
         hideTorchBtn();
@@ -874,8 +966,6 @@
     }
 
     // ── Torch / flashlight ────────────────────────────────────────────────────
-    // Native path owns nativeStream. ZXing path lets the video element own the
-    // stream via srcObject. getActiveStream() covers both cases.
     var torchOn = false;
     function getActiveStream() {
         if (nativeStream) return nativeStream;
@@ -992,9 +1082,9 @@
     }
     function clearRescanTarget() {
         rescanTarget = null;
-        cancelTapTimeout();            // kill any running 1s timer
-        tapPending   = false;          // gate closes — next scan needs a fresh tap
-        tapSession++;                  // invalidate any in-flight detect()
+        cancelTapTimeout();
+        tapPending   = false;
+        tapSession++;
         document.getElementById('scanner-container').classList.remove('rescan-mode');
         document.getElementById('rescan-prompt').style.display = 'none';
         if (scanning) document.getElementById('tap-hint').textContent = 'TAP TO SCAN';
@@ -1012,19 +1102,14 @@
     }
 
     // ── Commit ────────────────────────────────────────────────────────────────
-    // If rescanTarget is set: overwrite that cell and clear the target.
-    // Otherwise: add a new record as normal.
     function commitScan(code, format) {
-        // Line back to default colour — scan succeeded
         document.getElementById('scanner-container').classList.remove('scanning-active');
-        // Flash feedback always fires
         var fl = document.getElementById('scan-flash');
         fl.classList.remove('pop'); void fl.offsetWidth; fl.classList.add('pop');
 
         var card = document.getElementById('cameraCard');
         card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash');
 
-        // Show scanned code as a brief overlay toast on the scan window
         var toast = document.getElementById('scan-toast');
         toast.textContent = '✓ ' + code;
         toast.classList.add('show');
@@ -1034,39 +1119,23 @@
         }, 3000);
 
         if (rescanTarget !== null) {
-            // ── Rescan / item-chain overwrite ────────────────────────────────
-            // Write scanned value into the targeted field, then decide what next:
-            // If we just filled the 'item' column (end of chain) → clear target.
-            // If we just filled the 'value' column via manual rescan → clear too.
             records[rescanTarget.rowIdx][rescanTarget.col] = code;
             renderTable(); saveData();
             clearRescanTarget();
         } else {
-            // ── Normal new-record mode ───────────────────────────────────────
             addRecord(code, format);
-
-            // Multi-scan chain: after saving the first column (value), set up
-            // rescanTarget pointing to the item column on this same row.
-            // Do NOT reset lastCode here — keeping the cooldown active prevents the
-            // frame and would instantly fill item with the same value.
-            // User must tap explicitly to trigger the second scan.
             if (multiScan) {
                 var newIdx = records.length - 1;
                 rescanTarget = { rowIdx: newIdx, col: 'item' };
                 document.getElementById('scanner-container').classList.add('rescan-mode');
                 document.getElementById('rescan-prompt').textContent = '🔍 Scan ' + colNames.item;
                 document.getElementById('rescan-prompt').style.display = 'block';
-                // Do NOT reset lastCode here — keeping it in cooldown prevents the
-                // just-scanned barcode from auto-filling the item column if it stays
-                // in frame. The 3s cooldown window gives the user time to move the
-                // camera to the item barcode.
                 renderTable();
                 updateScanLabel();
             }
         }
 
         setHint('');
-        // Reset status to idle — dot goes grey, message clearly says "tap to scan"
         setStatus('idle', 'Tap the viewfinder to scan');
     }
 
@@ -1091,12 +1160,11 @@
         var val = input.value.trim(); if (!val) return;
         addRecord(val, 'manual'); input.value = '';
     }
+
     document.addEventListener('DOMContentLoaded', function() {
         renameInputEl = document.getElementById('rename-input');
 
         // ── Tap handler ───────────────────────────────────────────────────────
-        // Tap enables one scan attempt. The camera viewfinder stays live at all
-        // times — tap just unlocks the detection gate for a single result.
         var container = document.getElementById('scanner-container');
         function onTap(e) {
             if (!scanning) return;
@@ -1112,48 +1180,38 @@
             void ripple.offsetWidth;
             ripple.classList.add('burst');
 
-            // ── Unlock one scan ───────────────────────────────────────────────
-            // Set the gate, then explicitly kick off the native loop if on mobile.
-            // ZXing (desktop) already has its own internal loop — the gate alone
-            // is enough to let the next callback through.
-            // ── Start scan gate ───────────────────────────────────────────
-            // Clear any leftover timer and open a fresh session.
+            // ── Open a fresh scan session ─────────────────────────────────────
             cancelTapTimeout();
-            tapSession++;          // new session — kills any stale in-flight detects
+            tapSession++;
             tapPending = true;
-            lastCode  = '';        // reset cooldown — each tap is fresh user intent,
-            lastTime  = 0;         // so the same barcode can be re-scanned immediately
+            lastCode  = '';
+            lastTime  = 0;
             setStatus('active', 'Scanning...');
             dbg('TAP registered — session=' + tapSession + ' engine=' + (useNative ? 'native' : 'ZXing'));
 
-            // Mark container so CSS turns the scan line red for the 2s window
             document.getElementById('scanner-container').classList.add('scanning-active');
 
-            // 5s timeout — ZXing's internal scan rate on mobile can be slow.
-            // A new tap resets the timer via cancelTapTimeout() above.
+            // 5s timeout — if no barcode found, reset the gate
             tapTimer = setTimeout(resetTapGate, 5000);
 
             if (useNative) {
-                // Cancel any previous loop handle before starting fresh
                 nativeScanFrame._cropLogged = false;
                 if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
                 nativeScanFrame();
             } else {
-                // ZXing: cancel any stale loop and kick off fresh crop-decode rAF loop
                 zxScanFrame._logged = false;
                 if (zxLoop) { cancelAnimationFrame(zxLoop); zxLoop = null; }
                 zxScanFrame();
             }
         }
-        // On mobile, touchend fires then ~300ms later a ghost click fires too.
-        // We use a flag to swallow that ghost click so each physical tap = 1 session.
+
+        // Swallow ghost click that fires ~300ms after touchend on mobile
         var lastTouchEnd = 0;
         container.addEventListener('touchend', function(e) {
             lastTouchEnd = Date.now();
             onTap(e);
         });
         container.addEventListener('click', function(e) {
-            // If a touchend fired within the last 500ms this is a ghost click — ignore it
             if (Date.now() - lastTouchEnd < 500) return;
             onTap(e);
         });
@@ -1178,7 +1236,7 @@
         });
 
         // Keep --overlay-h CSS variable in sync with actual scan-overlay height
-        // so the scan-line translateY animation always lands exactly at the bottom
+        // so the scan-line translateY animation always lands at the bottom edge
         var overlay = document.querySelector('.scan-overlay');
         function syncOverlayH() {
             if (overlay) overlay.style.setProperty('--overlay-h', overlay.offsetHeight + 'px');
@@ -1194,38 +1252,28 @@
         loadData();
         dbg('DOM ready — page bootstrapped');
     });
+
     function deleteRecord(idx) { records.splice(idx,1); renderTable(); saveData(); }
     function clearAll() { if(!records.length) return; records=[]; clearRescanTarget(); renderTable(); saveData(); }
 
     // ── Render table head ─────────────────────────────────────────────────────
-    // Rebuilds the <thead> row. In multi-scan mode an extra "Scanned Item" column
-    // is injected between "Barcode Value" and "Format". Both data column headers
-    // are clickable to open the rename popup.
     function renderTableHead() {
         var thead = document.getElementById('tableHead');
         var colSpan = multiScan ? 6 : 5;
 
         var html = '<tr><th>#</th>';
-
-        // "Barcode Value" header — always editable
         html += '<th class="editable" onclick="openRename(\'value\')">' + esc(colNames.value) + '</th>';
-
-        // "Scanned Item" header — only in multi-scan mode
         if (multiScan) {
             html += '<th class="editable" onclick="openRename(\'item\')">' + esc(colNames.item) + '</th>';
         }
-
         html += '<th>Format</th><th>Timestamp</th><th></th></tr>';
         thead.innerHTML = html;
 
-        // Keep empty-row colspan in sync
         var emptyRow = document.querySelector('#tableBody .empty-msg');
         if (emptyRow) emptyRow.setAttribute('colspan', colSpan);
     }
 
     // ── Render table body ─────────────────────────────────────────────────────
-    // In multi-scan mode, data cells are clickable to enter rescan mode.
-    // The currently selected rescan cell gets the 'rescan-selected' class.
     function renderTable() {
         var tbody = document.getElementById('tableBody');
         var colSpan = multiScan ? 6 : 5;
@@ -1237,25 +1285,20 @@
         }
 
         tbody.innerHTML = records.map(function(r, i) {
-            // Determine if each cell is the selected rescan target
             var valueSelected = rescanTarget && rescanTarget.rowIdx === i && rescanTarget.col === 'value';
             var itemSelected  = rescanTarget && rescanTarget.rowIdx === i && rescanTarget.col === 'item';
-
             var valueCls = multiScan ? ('rescannable' + (valueSelected ? ' rescan-selected' : '')) : '';
             var itemCls  = multiScan ? ('rescannable' + (itemSelected  ? ' rescan-selected' : '')) : '';
-
             var valueClick = multiScan ? ' onclick="selectRescan(' + i + ', \'value\')"' : '';
             var itemClick  = multiScan ? ' onclick="selectRescan(' + i + ', \'item\')"'  : '';
 
             var row = '<tr>';
             row += '<td>' + (i + 1) + '</td>';
             row += '<td class="' + valueCls + '"' + valueClick + '><strong>' + esc(r.value) + '</strong></td>';
-
             if (multiScan) {
                 var itemDisplay = r.item ? ('<strong>' + esc(r.item) + '</strong>') : '<span style="color:#555;font-style:italic;">—</span>';
                 row += '<td class="' + itemCls + '"' + itemClick + '>' + itemDisplay + '</td>';
             }
-
             row += '<td>' + esc(r.format) + '</td>';
             row += '<td>' + esc(r.ts) + '</td>';
             row += '<td><button class="del-btn" onclick="deleteRecord(' + i + ')">&#10005;</button></td>';
