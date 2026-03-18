@@ -625,6 +625,12 @@
             var cropX = Math.round((vw - cropW) / 2);
             var cropY = Math.round((vh - cropH) / 2);
 
+            // ── One-time log — fires once per tap session, not per frame ──────
+            if (!nativeScanFrame._cropLogged) {
+                nativeScanFrame._cropLogged = true;
+                dbg('video: ' + vw + '×' + vh + ' | crop: x=' + cropX + ' y=' + cropY + ' w=' + cropW + ' h=' + cropH);
+            }
+
             createImageBitmap(video, cropX, cropY, cropW, cropH)
             .then(function(bitmap) {
                 return nativeDetector.detect(bitmap).then(function(barcodes) {
@@ -1014,6 +1020,7 @@
 
             if (useNative) {
                 // Cancel any previous loop handle before starting fresh
+                nativeScanFrame._cropLogged = false;  // reset so crop dims log once per tap
                 if (nativeLoop) { cancelAnimationFrame(nativeLoop); nativeLoop = null; }
                 nativeScanFrame();
             }
