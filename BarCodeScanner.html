@@ -443,11 +443,27 @@
     </div>
 </div>
 
-<!-- ── Debug panel (remove once scanning works) ──────────────────────────── -->
+<!-- ── Debug panel ─────────────────────────────────────────────────────────── -->
+<div style="width:100%;max-width:600px;margin-bottom:8px;text-align:right;">
+    <button id="dbg-toggle"
+            onclick="(function(){
+                var p   = document.getElementById('dbg-panel-body');
+                var btn = document.getElementById('dbg-toggle');
+                var hidden = p.style.display === 'none';
+                p.style.display  = hidden ? 'block' : 'none';
+                btn.textContent  = hidden ? '🔍 Hide Debug Log' : '🔍 Show Debug Log';
+            })()"
+            style="background:transparent;border:1px solid #4cc9f0;color:#4cc9f0;
+                   border-radius:6px;padding:4px 12px;font-size:0.75rem;cursor:pointer;">
+        🔍 Show Debug Log
+    </button>
+</div>
 <div id="debug-panel" style="width:100%;max-width:600px;background:#0d0d1a;border:1px solid #4cc9f0;
      border-radius:10px;padding:12px;margin-bottom:16px;font-family:monospace;font-size:0.75rem;color:#0f0;">
     <div style="color:#4cc9f0;margin-bottom:6px;font-weight:bold;">🔍 Debug Panel</div>
-    <div id="dbg-info">Loading...</div>
+    <div id="dbg-panel-body" style="display:none;">
+        <div id="dbg-info">Loading...</div>
+    </div>
 </div>
 
 <script>
